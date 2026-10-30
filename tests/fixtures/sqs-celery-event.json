@@ -1,0 +1,20 @@
+{
+  "Records": [
+    {
+      "messageId": "059f36b4-87a3-44ab-83d2-661975830a7d",
+      "receiptHandle": "AQEBwJnKyrHigUMZj6rYigCgxlaS3SLy0a...",
+      "body": "eyJib2R5IjogIlcxc3lMQ0F6WFN3Z2UzMHNJSHNpWTJGc2JHSmhZMnR6SWpvZ2JuVnNiQ3dnSW1WeWNtSmhZMnR6SWpvZ2JuVnNiQ3dnSW1Ob1lXbHVJam9nYm5Wc2JDd2dJbU5vYjNKa0lqb2diblZzYkgxZCIsICJjb250ZW50LWVuY29kaW5nIjogInV0Zi04IiwgImNvbnRlbnQtdHlwZSI6ICJhcHBsaWNhdGlvbi9qc29uIiwgImhlYWRlcnMiOiB7ImxhbmciOiAicHkiLCAidGFzayI6ICJ0ZXN0cy5hZGQiLCAiaWQiOiAiNWYwYzhhOWUtM2MxZC00YThiLTlhNTEtMmI3ZDFlNmM0ZjEwIiwgInNoYWRvdyI6IG51bGwsICJldGEiOiBudWxsLCAiZXhwaXJlcyI6IG51bGwsICJncm91cCI6IG51bGwsICJncm91cF9pbmRleCI6IG51bGwsICJyZXRyaWVzIjogMCwgInRpbWVsaW1pdCI6IFtudWxsLCBudWxsXSwgInJvb3RfaWQiOiAiNWYwYzhhOWUtM2MxZC00YThiLTlhNTEtMmI3ZDFlNmM0ZjEwIiwgInBhcmVudF9pZCI6IG51bGwsICJhcmdzcmVwciI6ICIoMiwgMykiLCAia3dhcmdzcmVwciI6ICJ7fSIsICJvcmlnaW4iOiAiZ2VuOEAxNjkuMjU0LjEwLjEiLCAiaWdub3JlX3Jlc3VsdCI6IGZhbHNlLCAicmVwbGFjZWRfdGFza19uZXN0aW5nIjogMCwgInN0YW1wZWRfaGVhZGVycyI6IG51bGwsICJzdGFtcHMiOiB7fX0sICJwcm9wZXJ0aWVzIjogeyJjb3JyZWxhdGlvbl9pZCI6ICI1ZjBjOGE5ZS0zYzFkLTRhOGItOWE1MS0yYjdkMWU2YzRmMTAiLCAicmVwbHlfdG8iOiAiOWI2ZTFmMGEtN2MyZC0zZTRmLThhOWItMGMxZDJlM2Y0YTViIiwgImRlbGl2ZXJ5X21vZGUiOiAyLCAiZGVsaXZlcnlfaW5mbyI6IHsiZXhjaGFuZ2UiOiAiIiwgInJvdXRpbmdfa2V5IjogImRlZmF1bHQifSwgInByaW9yaXR5IjogMCwgImJvZHlfZW5jb2RpbmciOiAiYmFzZTY0IiwgImRlbGl2ZXJ5X3RhZyI6ICIxZDJjM2I0YS01ZTZmLTRhN2ItOGM5ZC0wZTFmMmEzYjRjNWQifX0=",
+      "attributes": {
+        "ApproximateReceiveCount": "1",
+        "SentTimestamp": "1761480000000",
+        "SenderId": "AIDAIENQZJOLO23YVJ4VO",
+        "ApproximateFirstReceiveTimestamp": "1761480000005"
+      },
+      "messageAttributes": {},
+      "md5OfBody": "e4e68fb7bd0e697a0ae8f1bb342846b3",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:ca-central-1:123456789012:default--shop-production",
+      "awsRegion": "ca-central-1"
+    }
+  ]
+}

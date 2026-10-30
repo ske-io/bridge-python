@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ske-bridge"
+version = "0.1.0"
+description = "Runs a Django or Flask application's queued Celery tasks and beat schedule on SKE."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "SKE" }]
+requires-python = ">=3.11"
+dependencies = []
+classifiers = [
+    "Framework :: Django",
+    "Framework :: Flask",
+    "Framework :: Celery",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.optional-dependencies]
+django = ["django>=4.2"]
+flask = ["flask>=3.0"]
+celery = ["celery[sqs]>=5.3"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "django>=4.2",
+    "flask>=3.0",
+    "celery[sqs]>=5.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ske_bridge"]
+exclude = ["AGENTS.md", "CLAUDE.md"]
+
+[tool.hatch.build.targets.sdist]
+# Local working notes, never published.
+exclude = ["/AGENTS.md", "/CLAUDE.md", "/.venv", "uv.lock"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

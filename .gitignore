@@ -1,0 +1,17 @@
+/.venv/
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+/dist/
+/build/
+*.egg-info/
+
+# A library does not ship a lock file: consumers resolve against their own
+# application's constraints, so committing one here only creates churn.
+uv.lock
+
+.DS_Store
+/.idea
+/.vscode
+/.zed
+/.nova
