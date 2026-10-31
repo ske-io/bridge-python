@@ -139,7 +139,7 @@ def test_ske_schedule_sends_the_due_entries(platform, sqs_sent, monkeypatch, cap
 
 
 def test_ske_schedule_fails_when_an_entry_cannot_be_sent(platform, celery_app, monkeypatch):
-    monkeypatch.setattr(celery_app.conf, "beat_schedule", {"bad": {"task": "tests.record", "schedule": 60, "options": {"queue": "nowhere"}}})
+    monkeypatch.setitem(celery_app.conf, "beat_schedule", {"bad": {"task": "tests.record", "schedule": 60, "options": {"queue": "nowhere"}}})
 
     with pytest.raises(CommandError, match="1 scheduled task"):
         call_command("ske_schedule")

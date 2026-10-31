@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    branches:
+      - '*.*.x'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    # Every Python the package supports (pyproject.toml's requires-python and
+    # classifiers). The library ships no uv.lock, so each run resolves the
+    # newest development dependencies, as a tenant app would.
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+
+      - name: Run tests
+        run: uv run pytest
