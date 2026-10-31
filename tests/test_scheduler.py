@@ -143,7 +143,7 @@ def test_a_failed_send_is_reported_and_does_not_stop_the_rest(celery_app, monkey
 
 
 def test_nothing_due_says_so(celery_app, monkeypatch):
-    monkeypatch.setattr(celery_app.conf, "beat_schedule", {})
+    monkeypatch.setitem(celery_app.conf, "beat_schedule", {})
     lines = []
 
     tick(celery_app, MONDAY_0930_PARIS, echo=lines.append)

@@ -139,7 +139,7 @@ def test_flask_ske_schedule_sends_the_due_entries(app, sqs_sent, monkeypatch):
 
 
 def test_flask_ske_schedule_exits_non_zero_on_a_failed_send(app, celery_app, monkeypatch):
-    monkeypatch.setattr(celery_app.conf, "beat_schedule", {"bad": {"task": "tests.record", "schedule": 60, "options": {"queue": "nowhere"}}})
+    monkeypatch.setitem(celery_app.conf, "beat_schedule", {"bad": {"task": "tests.record", "schedule": 60, "options": {"queue": "nowhere"}}})
 
     result = app.test_cli_runner().invoke(args=["ske", "schedule"])
 
