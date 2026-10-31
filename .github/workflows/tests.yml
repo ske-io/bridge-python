@@ -5,6 +5,11 @@ on:
     branches:
       - '*.*.x'
   pull_request:
+  # The library ships no lock file, so each run installs the newest
+  # dependencies; a weekly run catches an upstream release that breaks the
+  # tests even when nothing here changes.
+  schedule:
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: read
