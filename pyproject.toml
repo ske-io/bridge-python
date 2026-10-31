@@ -22,6 +22,12 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 
+[project.urls]
+Homepage = "https://ske.io"
+Documentation = "https://app.ske.io/docs"
+Repository = "https://github.com/ske-io/bridge-python"
+Issues = "https://github.com/ske-io/bridge-python/issues"
+
 [project.optional-dependencies]
 django = ["django>=4.2"]
 flask = ["flask>=3.0"]

@@ -1,0 +1,74 @@
+name: publish
+
+# A published GitHub release goes to PyPI; a manual run goes to TestPyPI, to
+# try a build before releasing it. Both use trusted publishing: each index
+# trusts this workflow and its environment, so no API token is stored.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      # PyPI never takes a version twice, so a release tag that disagrees with
+      # pyproject.toml stops here rather than publishing the wrong version.
+      - name: Check the release tag
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(uv version --short)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Release tag $TAG does not match pyproject.toml version v$version"
+            exit 1
+          fi
+
+      - name: Build
+        run: uv build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'release' && 'pypi' || 'testpypi' }}
+
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: Publish to PyPI
+        if: github.event_name == 'release'
+        run: uv publish --trusted-publishing always
+
+      - name: Publish to TestPyPI
+        if: github.event_name != 'release'
+        run: uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/
