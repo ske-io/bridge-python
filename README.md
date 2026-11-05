@@ -74,6 +74,8 @@ app.conf.beat_schedule = {
 
 Set `MAINTENANCE_MODE_SECRET` to look at the site while it's down: visiting `https://your-site/<secret>` sets a cookie and redirects to `/`, and that browser is let in for 12 hours. The cookie is signed with the secret, so changing the secret ends every one handed out.
 
+Requests from addresses on the environment's access list also reach the app normally during maintenance, without setting a bypass cookie or requiring `MAINTENANCE_MODE_SECRET`. The platform marks them with an `SKE-Maintenance-Bypass` header, after removing any copy a client sent, carrying a secret token it puts in `SKE_MAINTENANCE_BYPASS_TOKEN` when the instance starts. A request is let in only when the header equals the token, compared in constant time, and never when the token is unset.
+
 ## Logs
 
 On the platform your app's logs are written to stderr as one JSON line per record, which the logs page reads into level, message, context and exception, with its traceback. Records keep the logger's name, the fields you pass with `extra=`, and the request's id as `request_id`. The root logger gets a stderr handler in this format, other loggers' console handlers (Django's, Flask's, gunicorn's) take the format too, and a console handler on a logger whose records reach the root logger anyway is removed, so nothing is written twice. Levels stay as you set them.

@@ -290,6 +290,10 @@ def test_djangos_smtp_backend_delivers_to_the_service_without_tls_or_login(mail_
 def down(platform, monkeypatch):
     monkeypatch.setenv("MAINTENANCE_MODE", "true")
     monkeypatch.setenv("MAINTENANCE_MODE_SECRET", "preview-secret")
+    monkeypatch.setenv("SKE_MAINTENANCE_BYPASS_TOKEN", BYPASS_TOKEN)
+
+
+BYPASS_TOKEN = "6f1c0e9a4b7d2385f0a1c3e5b7d9f1a3c5e7092b4d6f8a1c3e5b7d9f1a3c5e70"
 
 
 SITE = {"host": "app.example.com", "x-forwarded-proto": "https"}
@@ -321,6 +325,56 @@ def test_maintenance_keeps_readiness_and_the_queue(down, client, publish):
 
 def test_the_platforms_warmup_request_passes_maintenance(down, client):
     assert client.get("/", headers={**SITE, "X-Ske-Internal": "true"}).status_code == 200
+
+
+@pytest.mark.parametrize("secret", [None, "preview-secret"])
+def test_the_platforms_maintenance_bypass_header_lets_the_request_in(down, client, monkeypatch, secret):
+    if secret is None:
+        monkeypatch.delenv("MAINTENANCE_MODE_SECRET")
+
+    response = client.get("/", headers={**SITE, "SKE-Maintenance-Bypass": BYPASS_TOKEN})
+
+    assert response.status_code == 200
+    assert response.content == b"home"
+    assert "Set-Cookie" not in response
+    assert client.get("/", headers=SITE).status_code == 503
+
+
+@pytest.mark.parametrize("value", ["", "1", "true", BYPASS_TOKEN[:-1], BYPASS_TOKEN + "0", BYPASS_TOKEN.upper(), f"{BYPASS_TOKEN}, {BYPASS_TOKEN}", "é"])
+def test_other_maintenance_bypass_header_values_do_not_let_the_request_in(down, client, value):
+    response = client.get("/", headers={**SITE, "SKE-Maintenance-Bypass": value})
+
+    assert response.status_code == 503
+
+
+@pytest.mark.parametrize(("token", "value"), [(None, "1"), (None, ""), ("", ""), ("", "1")])
+def test_the_maintenance_bypass_header_is_ignored_without_a_platform_token(down, client, monkeypatch, token, value):
+    # A platform that sets no token may also pass along a client's copy of
+    # the header, so the header alone must never let a request in.
+    monkeypatch.delenv("SKE_MAINTENANCE_BYPASS_TOKEN")
+    if token is not None:
+        monkeypatch.setenv("SKE_MAINTENANCE_BYPASS_TOKEN", token)
+
+    response = client.get("/", headers={**SITE, "SKE-Maintenance-Bypass": value})
+
+    assert response.status_code == 503
+
+
+def test_the_maintenance_bypass_header_leaves_the_secret_path_to_the_app(down, client):
+    from types import ModuleType
+
+    from django.http import HttpResponse
+    from django.test import override_settings
+    from django.urls import path
+
+    urls = ModuleType("secret_page_urls")
+    urls.urlpatterns = [path("preview-secret", lambda request: HttpResponse("secret page"))]
+    with override_settings(ROOT_URLCONF=urls):
+        response = client.get("/preview-secret", headers={**SITE, "SKE-Maintenance-Bypass": BYPASS_TOKEN})
+
+    assert response.status_code == 200
+    assert response.content == b"secret page"
+    assert "Set-Cookie" not in response
 
 
 def test_the_secret_sets_a_cookie_that_lets_the_visitor_in(down, client):

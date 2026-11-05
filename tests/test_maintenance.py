@@ -88,3 +88,30 @@ def test_off_the_platform_nothing_is_paused(monkeypatch):
 
     assert not maintenance.active()
     assert check("/", None, True) is None
+
+
+TOKEN = "6f1c0e9a4b7d2385f0a1c3e5b7d9f1a3c5e7092b4d6f8a1c3e5b7d9f1a3c5e70"
+
+
+def test_the_platforms_bypass_token_lets_the_request_in(down, monkeypatch):
+    monkeypatch.setenv("SKE_MAINTENANCE_BYPASS_TOKEN", TOKEN)
+
+    assert check("/", None, True, bypass_header=TOKEN) is None
+    assert check("/preview-secret", None, True, bypass_header=TOKEN) is None
+
+
+@pytest.mark.parametrize("header", [None, "", "1", TOKEN[:-1], TOKEN + "0", TOKEN.upper(), "é"])
+def test_any_other_bypass_header_is_paused(down, monkeypatch, header):
+    monkeypatch.setenv("SKE_MAINTENANCE_BYPASS_TOKEN", TOKEN)
+
+    assert isinstance(check("/", None, True, bypass_header=header), Paused)
+
+
+@pytest.mark.parametrize("token", [None, ""])
+@pytest.mark.parametrize("header", [None, "", "1"])
+def test_without_a_platform_token_the_bypass_header_is_ignored(down, monkeypatch, token, header):
+    monkeypatch.delenv("SKE_MAINTENANCE_BYPASS_TOKEN", raising=False)
+    if token is not None:
+        monkeypatch.setenv("SKE_MAINTENANCE_BYPASS_TOKEN", token)
+
+    assert isinstance(check("/", None, True, bypass_header=header), Paused)

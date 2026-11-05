@@ -80,6 +80,7 @@ class InternalRoutesMiddleware:
 
             decision = maintenance.check(
                 request.path_info, request.META.get("HTTP_COOKIE"), request.is_secure(), is_internal(request.headers.get(INTERNAL_HEADER)),
+                bypass_header=request.headers.get(maintenance.BYPASS_HEADER),
             )
             if isinstance(decision, maintenance.Bypass):
                 response = HttpResponseRedirect("/")
