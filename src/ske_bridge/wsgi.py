@@ -15,6 +15,7 @@ from ske_bridge.logging import request_id
 from ske_bridge.routes import Routes, is_internal
 
 WSGIApp = Callable[[dict[str, Any], Callable[..., Any]], Iterable[bytes]]
+MAINTENANCE_BYPASS_ENVIRON = "HTTP_" + maintenance.BYPASS_HEADER.upper().replace("-", "_")
 
 
 class InternalRoutes:
@@ -39,7 +40,10 @@ class InternalRoutes:
             # On the platform X-Forwarded-Proto is set by the container's
             # entry process, never by the client; see ske_bridge.forwarded.
             secure = (environ.get("HTTP_X_FORWARDED_PROTO") or environ.get("wsgi.url_scheme")) == "https"
-            decision = maintenance.check(path, environ.get("HTTP_COOKIE"), secure, is_internal(environ.get("HTTP_X_SKE_INTERNAL")))
+            decision = maintenance.check(
+                path, environ.get("HTTP_COOKIE"), secure, is_internal(environ.get("HTTP_X_SKE_INTERNAL")),
+                bypass_header=environ.get(MAINTENANCE_BYPASS_ENVIRON),
+            )
             if isinstance(decision, maintenance.Bypass):
                 start_response("302 Found", [("Location", "/"), ("Set-Cookie", decision.cookie), ("Content-Length", "0")])
                 return [b""]
