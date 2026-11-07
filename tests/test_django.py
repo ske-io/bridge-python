@@ -9,7 +9,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import Client
 
-from ske_bridge.django.apps import MIDDLEWARE, SMTP_BACKEND, install_middleware, trust_forwarded_proto, use_mail_service
+from ske_bridge.django.apps import MIDDLEWARE, SMTP_BACKEND, install_middleware, trust_forwarded_proto, use_cache_prefix, use_mail_service
 from tests.conftest import record
 
 
@@ -401,3 +401,91 @@ def test_the_app_writes_its_logs_in_the_platforms_format():
     assert any(isinstance(h.formatter, JsonFormatter) for h in root.handlers)
     # Django's own console handler would write each record a second time.
     assert not any(type(h) is logging.StreamHandler for h in logging.getLogger("django").handlers)
+
+
+def project_cache_settings(**default):
+    return SimpleNamespace(
+        CACHES={
+            "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", **default},
+            "sessions": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "KEY_PREFIX": "sess"},
+        }
+    )
+
+
+def cache_key(settings, alias="default", key="greeting"):
+    """The key Django's cache backend writes for ``key`` with these settings."""
+    from django.core.cache.backends.locmem import LocMemCache
+
+    params = settings.CACHES[alias]
+    return LocMemCache(f"test-{alias}", params).make_key(key)
+
+
+def test_two_previews_write_different_cache_keys(monkeypatch):
+    keys = []
+    for prefix in ("shop-pr-1:cache:", "shop-pr-2:cache:"):
+        monkeypatch.setenv("SKE_CACHE_PREFIX", prefix)
+        settings = project_cache_settings()
+        use_cache_prefix(settings)
+        keys.append(cache_key(settings))
+
+    assert keys == ["shop-pr-1:cache::1:greeting", "shop-pr-2:cache::1:greeting"]
+
+
+def test_every_cache_alias_gets_the_prefix_before_its_own(monkeypatch):
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    settings = project_cache_settings(KEY_PREFIX="myapp")
+
+    use_cache_prefix(settings)
+
+    assert settings.CACHES["default"]["KEY_PREFIX"] == "shop-pr-1:cache:myapp"
+    assert settings.CACHES["sessions"]["KEY_PREFIX"] == "shop-pr-1:cache:sess"
+
+
+def test_caches_are_left_alone_without_a_prefix(monkeypatch):
+    monkeypatch.delenv("SKE_CACHE_PREFIX", raising=False)
+    settings = project_cache_settings(KEY_PREFIX="myapp")
+
+    use_cache_prefix(settings)
+
+    assert settings.CACHES["default"]["KEY_PREFIX"] == "myapp"
+    assert settings.CACHES["sessions"]["KEY_PREFIX"] == "sess"
+    assert cache_key(settings) == "myapp:1:greeting"
+
+
+class BuiltCaches:
+    """The cache handler's view of the backends already built in this thread."""
+
+    def __init__(self, *backends):
+        self.backends = backends
+
+    def all(self, initialized_only=False):
+        return list(self.backends)
+
+
+def test_a_backend_built_before_the_app_is_ready_gets_the_prefix(monkeypatch):
+    from django.core.cache.backends.locmem import LocMemCache
+
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    settings = project_cache_settings(KEY_PREFIX="myapp")
+    # Another app used the cache in its own ready(), before this one.
+    built = LocMemCache("built-early", dict(settings.CACHES["default"]))
+
+    use_cache_prefix(settings, BuiltCaches(built))
+
+    assert built.make_key("greeting") == "shop-pr-1:cache:myapp:1:greeting"
+
+
+def test_the_prefix_is_applied_when_the_app_config_is_created(platform, monkeypatch):
+    """App configs are created before any app's models or ready() run, so a
+    cache another app builds then, in any thread, has the prefix."""
+    import ske_bridge.django as module
+    from django.conf import settings
+
+    from ske_bridge.django.apps import SkeBridgeConfig
+
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    monkeypatch.setattr(settings, "CACHES", {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "KEY_PREFIX": "myapp"}})
+
+    SkeBridgeConfig("ske_bridge.django", module)
+
+    assert settings.CACHES["default"]["KEY_PREFIX"] == "shop-pr-1:cache:myapp"

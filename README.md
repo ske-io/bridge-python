@@ -91,6 +91,15 @@ When the environment has the platform's mail service attached, the platform runs
 
 These override your own SMTP server settings: the service is attached to keep mail from going out, and your real server would let it out. Without the service, and off the platform, your settings are used as they are. An app that sends with `smtplib` directly should connect to `MAIL_HOST` and `MAIL_PORT` itself, without `starttls()` or `login()`.
 
+## Cache key prefix
+
+A preview environment shares its base environment's cache server. To keep their keys apart, the platform sets `SKE_CACHE_PREFIX` on each preview, and on the platform the bridge puts it before your own prefix:
+
+- Django: the `KEY_PREFIX` of every alias in `CACHES`, so `KEY_PREFIX = "myapp"` becomes `<SKE_CACHE_PREFIX>myapp`. A cache another app used before this one was ready is updated too.
+- Flask: Flask-Caching's `CACHE_KEY_PREFIX`, including a `Cache`'s own `config=`, whether it is set up before or after `SkeBridge(app)`. A callable prefix stays callable.
+
+Without the variable, your settings are used as they are. Code that talks to Redis or Memcached directly, outside the framework's cache, should put `SKE_CACHE_PREFIX` before its keys itself.
+
 ## Celery
 
 Point Celery at the platform's queue after the application's own configuration:

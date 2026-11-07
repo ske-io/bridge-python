@@ -27,7 +27,7 @@ import click
 from flask import Flask, abort, current_app, request
 from flask.cli import with_appcontext
 
-from ske_bridge import environment
+from ske_bridge import cache, environment
 from ske_bridge.forwarded import TRUSTED_HOPS
 from ske_bridge.mail import mail_service
 from ske_bridge.routes import Routes
@@ -58,6 +58,7 @@ class SkeBridge:
             # platform refused.
             app.before_request_funcs.setdefault(None, []).insert(0, _refuse_static)
             use_mail_service(app)
+            use_cache_prefix(app)
             use_structured_logs(app)
 
     def celery_app(self, app: Flask) -> Any:
@@ -99,6 +100,41 @@ def _maintenance_page(app: Flask, environ: dict[str, Any]) -> bytes | None:
             return render_template(TEMPLATE).encode()
         except TemplateNotFound:
             return None
+
+
+def use_cache_prefix(app: Flask) -> None:
+    """Puts the platform's cache key prefix (see ske_bridge.cache) before
+    Flask-Caching's ``CACHE_KEY_PREFIX``.
+
+    Flask-Caching builds each ``Cache``'s backend from app.config with the
+    ``Cache``'s own config over it, then stores it in
+    ``app.extensions["cache"]``. So the prefix goes into app.config, and that
+    store is replaced with one that gives each backend the prefix as it is
+    stored: a backend built before SkeBridge, or after it, in or out of an
+    application context, gets it before it is used."""
+    platform = cache.prefix()
+    if platform is None:
+        return
+
+    app.config["CACHE_KEY_PREFIX"] = cache.prefixed(app.config.get("CACHE_KEY_PREFIX"), platform)
+    app.extensions["cache"] = PrefixedBackends(platform, app.extensions.get("cache") or {})
+
+
+class PrefixedBackends(dict):
+    """``app.extensions["cache"]``, Flask-Caching's ``{Cache: backend}``,
+    giving each backend stored in it the platform's prefix. A backend without
+    a prefix (the in-process and file ones) is stored as it is."""
+
+    def __init__(self, platform: str, backends: dict[Any, Any]):
+        super().__init__()
+        self.platform = platform
+        for key, backend in backends.items():
+            self[key] = backend
+
+    def __setitem__(self, key: Any, backend: Any) -> None:
+        if hasattr(backend, "key_prefix"):
+            backend.key_prefix = cache.prefixed(backend.key_prefix, self.platform)
+        super().__setitem__(key, backend)
 
 
 def use_mail_service(app: Flask) -> None:

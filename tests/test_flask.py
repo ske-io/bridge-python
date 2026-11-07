@@ -451,3 +451,121 @@ def test_plain_logs_keep_flasks_handler(platform, monkeypatch):
     SkeBridge(app)
 
     assert default_handler in app.logger.handlers
+
+
+def test_flask_caching_reads_the_platform_prefix(platform, monkeypatch):
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    app = Flask("tests")
+    app.config["CACHE_KEY_PREFIX"] = "myapp_"
+
+    SkeBridge(app)
+
+    assert app.config["CACHE_KEY_PREFIX"] == "shop-pr-1:cache:myapp_"
+
+
+def test_a_cache_initialised_first_gets_the_prefix_too(platform, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    app = Flask("tests")
+    # Flask-Caching keeps one backend per Cache object, built from the config
+    # when initialised; the shared-server backends hold the prefix as key_prefix.
+    redis = SimpleNamespace(key_prefix="flask_cache_")
+    simple = SimpleNamespace()
+    app.extensions["cache"] = {object(): redis, object(): simple}
+
+    SkeBridge(app)
+
+    assert redis.key_prefix == "shop-pr-1:cache:flask_cache_"
+    assert vars(simple) == {}
+
+
+def test_two_previews_get_different_cache_prefixes(platform, monkeypatch):
+    prefixes = []
+    for prefix in ("shop-pr-1:cache:", "shop-pr-2:cache:"):
+        monkeypatch.setenv("SKE_CACHE_PREFIX", prefix)
+        app = Flask("tests")
+        SkeBridge(app)
+        prefixes.append(app.config["CACHE_KEY_PREFIX"])
+
+    assert prefixes == ["shop-pr-1:cache:", "shop-pr-2:cache:"]
+
+
+def test_the_cache_config_is_left_alone_without_a_prefix(platform, monkeypatch):
+    monkeypatch.delenv("SKE_CACHE_PREFIX", raising=False)
+    app = Flask("tests")
+
+    SkeBridge(app)
+
+    assert "CACHE_KEY_PREFIX" not in app.config
+
+
+def test_a_callable_cache_prefix_keeps_working(platform, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    app = Flask("tests")
+    app.config["CACHE_KEY_PREFIX"] = lambda: "tenant:"
+    redis = SimpleNamespace(key_prefix=lambda: "tenant:")
+    app.extensions["cache"] = {object(): redis}
+
+    SkeBridge(app)
+
+    assert app.config["CACHE_KEY_PREFIX"]() == "shop-pr-1:cache:tenant:"
+    assert redis.key_prefix() == "shop-pr-1:cache:tenant:"
+
+
+def register_backend(app, backend):
+    """What Flask-Caching does when a Cache is initialised, after merging its
+    own config over app.config: it stores the backend it built."""
+    app.extensions.setdefault("cache", {})
+    app.extensions["cache"][object()] = backend
+
+
+def test_a_cache_initialised_after_the_bridge_gets_the_prefix_as_it_is_built(platform, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    app = Flask("tests")
+    SkeBridge(app)
+
+    # Outside any application context, as Cache(app, config=...) at import time.
+    outside = SimpleNamespace(key_prefix="own:")
+    register_backend(app, outside)
+    # Inside one that was pushed before the backend existed.
+    with app.app_context():
+        inside = SimpleNamespace(key_prefix="own:")
+        register_backend(app, inside)
+        assert inside.key_prefix == "shop-pr-1:cache:own:"
+
+    assert outside.key_prefix == "shop-pr-1:cache:own:"
+
+
+def test_setting_up_the_bridge_again_keeps_one_prefix(platform, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    app = Flask("tests")
+    SkeBridge(app)
+    SkeBridge(app)
+    redis = SimpleNamespace(key_prefix="own:")
+    register_backend(app, redis)
+    SkeBridge(app)
+
+    assert redis.key_prefix == "shop-pr-1:cache:own:"
+    assert app.config["CACHE_KEY_PREFIX"] == "shop-pr-1:cache:"
+
+
+def test_the_bridge_holds_no_reference_to_a_discarded_app(platform, monkeypatch):
+    import gc
+    import weakref
+
+    monkeypatch.setenv("SKE_CACHE_PREFIX", "shop-pr-1:cache:")
+    app = Flask("tests")
+    SkeBridge(app)
+    ref = weakref.ref(app)
+
+    del app
+    gc.collect()
+
+    assert ref() is None
