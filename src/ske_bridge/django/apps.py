@@ -4,7 +4,7 @@ from typing import Any
 
 from django.apps import AppConfig
 
-from ske_bridge import environment
+from ske_bridge import cache, environment
 from ske_bridge.mail import mail_service
 
 MIDDLEWARE = "ske_bridge.django.middleware.InternalRoutesMiddleware"
@@ -14,6 +14,15 @@ class SkeBridgeConfig(AppConfig):
     name = "ske_bridge.django"
     label = "ske_bridge"
     verbose_name = "SKE"
+
+    def __init__(self, app_name: str, app_module: Any):
+        super().__init__(app_name, app_module)
+        # App configs are created before any app's models or ready() run, so
+        # a cache built from then on, in any thread, has the prefix.
+        if environment.running_on_platform():
+            from django.conf import settings
+
+            use_cache_prefix(settings)
 
     def ready(self) -> None:
         if environment.running_on_platform():
@@ -30,6 +39,32 @@ class SkeBridgeConfig(AppConfig):
 
 
 SMTP_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+
+
+def use_cache_prefix(settings: Any, built: Any = None) -> None:
+    """Puts the platform's cache key prefix (see ske_bridge.cache) before the
+    ``KEY_PREFIX`` of every ``CACHES`` alias.
+
+    Django copies ``KEY_PREFIX`` into an alias's backend when it builds it,
+    the first time the alias is used. This runs when the app config is
+    created, before any app's models or ``ready()``, so backends built later,
+    in any thread, get the prefix. A backend this thread already built
+    (``built``: Django's cache handler by default) has its ``key_prefix``
+    changed in place, which also reaches code that holds it. A backend
+    another thread built while the app registry was still being created
+    keeps its own prefix, as no setting can reach it."""
+    platform = cache.prefix()
+    if platform is None:
+        return
+
+    for params in getattr(settings, "CACHES", {}).values():
+        params["KEY_PREFIX"] = cache.prefixed(params.get("KEY_PREFIX"), platform)
+
+    if built is None:
+        from django.core.cache import caches as built
+
+    for backend in built.all(initialized_only=True):
+        backend.key_prefix = cache.prefixed(backend.key_prefix, platform)
 
 
 def use_mail_service(settings: Any) -> None:
