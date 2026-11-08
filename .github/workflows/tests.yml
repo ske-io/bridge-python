@@ -20,7 +20,7 @@ jobs:
 
     # Every Python the package supports (pyproject.toml's requires-python and
     # classifiers). The library ships no uv.lock, so each run resolves the
-    # newest development dependencies, as a tenant app would.
+    # newest development dependencies, as an application would.
     strategy:
       fail-fast: false
       matrix:
