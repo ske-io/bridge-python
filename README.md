@@ -1,6 +1,6 @@
 # ske-bridge
 
-Runs a Django or Flask application on SKE: it answers the platform's internal routes inside the application, runs delivered Celery tasks, and turns the Celery beat schedule into the command the platform runs every minute.
+Runs a Django, Flask or any other WSGI or ASGI application on SKE: it answers the platform's internal routes inside the application, runs delivered Celery tasks, and turns the Celery beat schedule into the command the platform runs every minute.
 
 Everything is inert off the platform (when neither `SKE_PROJECT_TYPE` nor `SKE_ENVIRONMENT` is set), so the package is safe to install unconditionally.
 
@@ -51,6 +51,40 @@ def create_app():
 ```
 
 On the platform the extension wraps `app.wsgi_app`, so the internal routes are answered before Flask's routing and `before_request` hooks. It also applies Werkzeug's `ProxyFix` for one trusted proxy, so `request.remote_addr`, `request.scheme`, `request.host` and external URLs are the client's; see [Client address and scheme](#client-address-and-scheme). Don't add a `ProxyFix` of your own for the platform. Flask's static routes (the app's and each blueprint's) answer 404 for dotfiles, files in dot-directories and source files (`.py`, `.pyc`, `.sh`, `.php` and the like), as the platform's own static file server does; off the platform they serve as usual. Each Celery task runs inside an application context.
+
+## Any WSGI or ASGI app
+
+For an app that is neither Django nor Flask (FastAPI, Starlette, Litestar, Falcon, Bottle, or a plain WSGI or ASGI callable), wrap it where your server loads it:
+
+```python
+# main.py
+import ske_bridge.asgi   # ske_bridge.wsgi for a WSGI app
+
+app = ske_bridge.asgi.wrap(FastAPI())
+```
+
+or name it in the server's import string, which leaves your code unchanged:
+
+```python
+# gunicorn.conf.py
+wsgi_app = 'ske_bridge.asgi:wrap("main:app")'   # with an ASGI worker class
+wsgi_app = 'ske_bridge.wsgi:wrap("main:app")'   # for a WSGI app
+```
+
+`wrap()` takes the app or a `module:attribute` import string. An import string that can't be imported fails with an `ImportError` naming it. Off the platform `wrap()` returns the app unchanged, and wrapping an app twice changes nothing. A Django app with `ske_bridge.django` installed, or a Flask app with `SkeBridge`, already has all of this and more, so `wrap()` refuses it with an error: serve it as it is. On the platform it adds:
+
+- The internal routes, answered before your app's routing and middleware.
+- Maintenance mode, with the minimal maintenance page (there is no template to look up); see [Maintenance mode](#maintenance-mode).
+- The client's address, scheme and host from the trusted hop: `REMOTE_ADDR`, `wsgi.url_scheme` and `HTTP_HOST` in the WSGI environ, or `client`, `scheme`, the `host` header and `server` in the ASGI scope; see [Client address and scheme](#client-address-and-scheme). Don't add your own proxy-header middleware for the platform.
+- The request id in your logs, and structured logs; see [Logs](#logs).
+
+Lifespan events reach an ASGI app untouched, so startup and shutdown handlers run as usual. WebSockets reach it with the client's address and scheme. During maintenance a new WebSocket is refused unless it is let in the same ways a request is: with a `503` and the maintenance page when the server can send one, otherwise by closing it before it is accepted, which the server answers with `403`. Connections opened before maintenance began are ended by the redeploy.
+
+Delivered tasks run through Celery when `SKE_CELERY_APP` (or `CELERY_APP`) names the Celery app, as for `celery -A`; see [Celery](#celery). Without it the queue answers `500` saying nothing runs queued jobs, and the platform delivers the batch again. An ASGI app runs each batch in a thread of the bridge's own pool, so the event loop keeps serving requests and the readiness route answers at once while batches run.
+
+Interrupting a task needs the main thread, so under an ASGI app neither Celery's time limits (`time_limit`, `soft_time_limit`) nor the batch's deadline are applied: a task runs until it returns. A task that runs past the queue's timeout makes the platform time out the whole request, and the platform then delivers every message of that batch again, including those whose tasks already succeeded. Keep each task well inside the queue's timeout, and make tasks safe to run twice. A WSGI app served by gunicorn's sync worker has neither limitation.
+
+The mail service and the cache key prefix are environment variables (`MAIL_HOST`, `MAIL_PORT`, `SKE_CACHE_PREFIX`) such an app reads itself, as described under [Mail](#mail) and [Cache key prefix](#cache-key-prefix).
 
 ## Client address and scheme
 

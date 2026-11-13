@@ -42,8 +42,9 @@ from ske_bridge import environment
 request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("ske_request_id", default=None)
 
 #: Attributes every LogRecord has; anything else on a record came from
-#: ``extra=`` and belongs in its context.
-_RECORD_ATTRIBUTES = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None))) | {"message", "asctime", "taskName"}
+#: ``extra=`` and belongs in its context. ``color_message`` is uvicorn's
+#: terminal-coloured copy of the message.
+_RECORD_ATTRIBUTES = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None))) | {"message", "asctime", "taskName", "color_message"}
 
 
 class JsonFormatter(logging.Formatter):

@@ -489,3 +489,19 @@ def test_the_prefix_is_applied_when_the_app_config_is_created(platform, monkeypa
     SkeBridgeConfig("ske_bridge.django", module)
 
     assert settings.CACHES["default"]["KEY_PREFIX"] == "shop-pr-1:cache:myapp"
+
+
+@pytest.mark.parametrize("on_platform", [True, False])
+def test_a_django_app_with_the_bridge_is_not_wrapped(on_platform, monkeypatch):
+    from django.core.handlers.asgi import ASGIHandler
+    from django.core.handlers.wsgi import WSGIHandler
+
+    from ske_bridge import asgi, wsgi
+    from ske_bridge.generic import AlreadyIntegrated
+
+    if on_platform:
+        monkeypatch.setenv("SKE_ENVIRONMENT", "production")
+    with pytest.raises(AlreadyIntegrated, match="this Django app has ske_bridge.django already"):
+        wsgi.wrap(WSGIHandler())
+    with pytest.raises(AlreadyIntegrated, match="this Django app has ske_bridge.django already"):
+        asgi.wrap(ASGIHandler())
