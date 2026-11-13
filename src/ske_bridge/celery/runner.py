@@ -109,11 +109,25 @@ class QueueRunner:
         self.accept = prepare_accept_content(app.conf.accept_content)
         self.hostname = socket.gethostname()
         self._tracers: dict[str, Callable[..., Any]] = {}
-        self._run: _Run | None = None
+        # The task running in each thread: an ASGI app runs batches in worker
+        # threads, several at once, through this one runner.
+        self._local = threading.local()
+
+    @property
+    def _run(self) -> _Run | None:
+        return getattr(self._local, "run", None)
+
+    @_run.setter
+    def _run(self, run: _Run | None) -> None:
+        self._local.run = run
 
     def process(self, records: list[Any], options: dict[str, Any] | None = None) -> list[JobOutcome]:
         """One outcome per record, in the order they arrived."""
         deadline = batch_deadline(options or {})
+        # Celery's current app is per thread: in a thread other than the one
+        # that created the app, shared_task proxies and current_app would be
+        # Celery's default app, which publishes nowhere the platform reads.
+        self.app.set_current()
 
         return [self._process_one(r if isinstance(r, dict) else {}, deadline) for r in records]
 

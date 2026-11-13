@@ -1,8 +1,8 @@
 """The internal routes as WSGI middleware, for frameworks that are WSGI
-applications underneath (Flask). It answers ``/__ske/*`` itself, answers web
-requests while the platform has the app in maintenance (see
-ske_bridge.maintenance), and passes everything else to the application with
-the request id the logs carry (see ske_bridge.logging)."""
+applications underneath (Flask) and for any other WSGI app through wrap(). It
+answers ``/__ske/*`` itself, answers web requests while the platform has the
+app in maintenance (see ske_bridge.maintenance), and passes everything else to
+the application with the request id the logs carry (see ske_bridge.logging)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from collections.abc import Callable, Iterable
 from http import HTTPStatus
 from typing import Any
 
-from ske_bridge import maintenance
+from ske_bridge import environment, forwarded, generic, maintenance
+from ske_bridge import logging as ske_logging
 from ske_bridge.logging import request_id
 from ske_bridge.routes import Routes, is_internal
 
@@ -66,6 +67,56 @@ class InternalRoutes:
             [("Content-Type", "application/json"), ("Content-Length", str(len(content)))],
         )
         return [content]
+
+
+class TrustedProxy:
+    """Puts the client's address, scheme and host from the one trusted proxy
+    hop where a WSGI app reads them (``REMOTE_ADDR``, ``wsgi.url_scheme``,
+    ``HTTP_HOST``, ``SERVER_NAME``, ``SERVER_PORT``), as Werkzeug's ProxyFix
+    does for Flask; see ske_bridge.forwarded. Only for the platform, where
+    the headers are the platform's own."""
+
+    def __init__(self, app: WSGIApp):
+        self.app = app
+
+    def __call__(self, environ: dict[str, Any], start_response: Callable[..., Any]) -> Iterable[bytes]:
+        origin = forwarded.origin(
+            environ.get("HTTP_X_FORWARDED_FOR"),
+            environ.get("HTTP_X_FORWARDED_PROTO"),
+            environ.get("HTTP_X_FORWARDED_HOST"),
+            environ.get("HTTP_X_FORWARDED_PORT"),
+            environ.get("wsgi.url_scheme") or "http",
+        )
+        if origin.client is not None:
+            environ["REMOTE_ADDR"] = origin.client
+        if origin.scheme is not None:
+            environ["wsgi.url_scheme"] = origin.scheme
+        if origin.host is not None:
+            environ["HTTP_HOST"] = origin.host
+        if origin.server is not None:
+            environ["SERVER_NAME"], environ["SERVER_PORT"] = origin.server[0], str(origin.server[1])
+        return self.app(environ, start_response)
+
+
+def wrap(app: WSGIApp | str) -> WSGIApp:
+    """Any WSGI app, or the ``module:attribute`` import string naming one,
+    with the platform's middleware: the internal routes, maintenance mode and
+    the request id (InternalRoutes), and the trusted hop's client, scheme and
+    host (TrustedProxy). Structured logs are set up too.
+
+    Off the platform the app is returned unchanged, and so is an app already
+    wrapped. An app that has the bridge's Django or Flask integration is
+    refused. A server that loads its app from an import string can call it
+    there, for gunicorn ``wsgi_app = 'ske_bridge.wsgi:wrap("main:app")'``.
+    See ske_bridge.generic."""
+    if isinstance(app, str):
+        app = generic.load(app)
+    generic.refuse_integrated(app)
+    if not environment.running_on_platform() or isinstance(app, InternalRoutes):
+        return app
+
+    ske_logging.configure()
+    return InternalRoutes(TrustedProxy(app), Routes(generic.queue_runner))
 
 
 def read_body(environ: dict[str, Any]) -> bytes:

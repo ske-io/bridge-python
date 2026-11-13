@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ske-bridge"
 version = "0.1.1"
-description = "Runs a Django or Flask application's queued Celery tasks and beat schedule on SKE."
+description = "Runs any WSGI or ASGI application on SKE, with its queued Celery tasks and beat schedule, and integrates with Django and Flask."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "SKE" }]
@@ -15,6 +15,8 @@ classifiers = [
     "Framework :: Django",
     "Framework :: Flask",
     "Framework :: Celery",
+    "Framework :: AsyncIO",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Middleware",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
