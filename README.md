@@ -84,6 +84,8 @@ Delivered tasks run through Celery when `SKE_CELERY_APP` (or `CELERY_APP`) names
 
 Interrupting a task needs the main thread, so under an ASGI app neither Celery's time limits (`time_limit`, `soft_time_limit`) nor the batch's deadline are applied: a task runs until it returns. A task that runs past the queue's timeout makes the platform time out the whole request, and the platform then delivers every message of that batch again, including those whose tasks already succeeded. Keep each task well inside the queue's timeout, and make tasks safe to run twice. A WSGI app served by gunicorn's sync worker has neither limitation.
 
+So for an ASGI app the platform runs delivered tasks in a separate process with `ske_bridge.wsgi:queue("main:app")` (gunicorn's `wsgi_app`, on sync workers), and the time limits and deadline apply there. It imports your app, so the Celery app and tasks it sets up are registered, but never calls it: it answers only the internal routes, and `404` for every other path. It works for a WSGI app as well, and refuses an app with the Django or Flask integration, as `wrap()` does.
+
 The mail service and the cache key prefix are environment variables (`MAIL_HOST`, `MAIL_PORT`, `SKE_CACHE_PREFIX`) such an app reads itself, as described under [Mail](#mail) and [Cache key prefix](#cache-key-prefix).
 
 ## Client address and scheme

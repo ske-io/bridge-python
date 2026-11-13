@@ -213,3 +213,95 @@ def test_a_flask_app_without_the_extension_is_wrapped(platform):
     from flask import Flask
 
     assert isinstance(wsgi.wrap(Flask("tests")), wsgi.InternalRoutes)
+
+
+# queue(): the internal routes alone, for a process that runs jobs
+
+
+def queue_only(target, path="/__ske/queue", records=(), timeout=None):
+    payload = {"source": "sqs", "records": list(records)}
+    if timeout is not None:
+        payload["options"] = {"timeout": timeout}
+    return call(wsgi.queue(target), path, "POST", {"X-Ske-Internal": "true"}, json.dumps(payload).encode())
+
+
+def test_queue_runs_a_batch_for_an_asgi_app_without_calling_it(platform, publish):
+    from tests import test_asgi
+    from tests.celery_app import calls
+
+    before = len(test_asgi.app.calls)
+    status, _, body = queue_only("tests.test_asgi:app", records=[record(publish("tests.add", (3, 4)))])
+
+    assert status == 200 and json.loads(body)["outcomes"][0]["deleted"]
+    assert calls == [("add", 3, 4)]
+    assert len(test_asgi.app.calls) == before
+
+
+def test_queue_enforces_celery_time_limits_on_a_sync_worker(platform, publish):
+    import time
+
+    from tests.celery_app import calls
+
+    started = time.monotonic()
+    status, _, body = queue_only("tests.test_wsgi:app", records=[record(publish("tests.soft_then_hard"))])
+
+    outcome = json.loads(body)["outcomes"][0]
+    assert status == 200 and outcome["failed"] and outcome["error"].startswith("TimeLimitExceeded")
+    assert calls == [("soft",)]
+    assert time.monotonic() - started < 1.5
+
+
+def test_queue_enforces_the_batch_deadline_on_a_sync_worker(platform, publish):
+    import time
+
+    started = time.monotonic()
+    _, _, body = queue_only("tests.test_wsgi:app", records=[record(publish("tests.slow", (5,)))], timeout=2)
+
+    outcome = json.loads(body)["outcomes"][0]
+    assert outcome["released"] and "batch's deadline" in outcome["error"]
+    assert time.monotonic() - started < 1.5
+
+
+def test_queue_answers_health_and_404_for_every_other_path(platform):
+    queue = wsgi.queue("tests.test_wsgi:app")
+    before = len(app.calls)
+
+    assert call(queue, "/__ske/health")[::2] == (200, b'{"status": "ok"}')
+    assert call(queue, "/")[::2] == (404, b'{"error": "not found"}')
+    assert call(queue, "/users", "HEAD")[::2] == (404, b"")
+    assert len(app.calls) == before
+
+
+def test_queue_behaves_the_same_off_the_platform(monkeypatch, publish, logs_configured):
+    monkeypatch.setenv("SKE_CELERY_APP", "tests.celery_app:app")
+
+    assert queue_only("tests.test_wsgi:app", records=[record(publish("tests.add", (1, 2)))])[0] == 200
+    assert call(wsgi.queue("tests.test_wsgi:app"), "/")[0] == 404
+
+
+def test_queue_without_a_celery_app_answers_500(monkeypatch):
+    status, _, body = queue_only("tests.test_wsgi:app", records=[record("{}")])
+
+    assert status == 500 and json.loads(body)["error"].startswith("NoQueueRunner")
+
+
+def test_queue_refuses_an_app_with_the_framework_integration(monkeypatch):
+    import sys
+
+    from flask import Flask
+
+    from ske_bridge.flask import SkeBridge
+
+    flask_app = Flask("tests")
+    SkeBridge(flask_app)
+    monkeypatch.setattr(sys.modules[__name__], "integrated", flask_app, raising=False)
+
+    with pytest.raises(AlreadyIntegrated, match="this Flask app has SkeBridge already"):
+        wsgi.queue("tests.test_wsgi:integrated")
+
+
+def test_queue_names_an_import_string_that_cannot_be_imported():
+    from ske_bridge.generic import AppImportError
+
+    with pytest.raises(AppImportError, match="'nowhere:app'"):
+        wsgi.queue("nowhere:app")

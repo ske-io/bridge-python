@@ -13,7 +13,7 @@ from typing import Any
 from ske_bridge import environment, forwarded, generic, maintenance
 from ske_bridge import logging as ske_logging
 from ske_bridge.logging import request_id
-from ske_bridge.routes import Routes, is_internal
+from ske_bridge.routes import NOT_FOUND, Routes, is_internal
 
 WSGIApp = Callable[[dict[str, Any], Callable[..., Any]], Iterable[bytes]]
 MAINTENANCE_BYPASS_ENVIRON = "HTTP_" + maintenance.BYPASS_HEADER.upper().replace("-", "_")
@@ -117,6 +117,29 @@ def wrap(app: WSGIApp | str) -> WSGIApp:
 
     ske_logging.configure()
     return InternalRoutes(TrustedProxy(app), Routes(generic.queue_runner))
+
+
+def queue(target: str) -> WSGIApp:
+    """A WSGI app that serves only the internal routes for the app the
+    ``module:attribute`` import string names, for a process that runs
+    delivered jobs and serves no web traffic: every other path is a 404.
+
+    The app is imported, so what its import sets up (its Celery app, its
+    jobs) is there, but never called, so it may be WSGI or ASGI. Served by a
+    sync WSGI worker, which runs requests on the main thread, the jobs get
+    Celery's time limits and the batch's deadline, which an ASGI app's event
+    loop cannot give them. An app that has the bridge's Django or Flask
+    integration is refused, as wrap() refuses it. For gunicorn
+    ``wsgi_app = 'ske_bridge.wsgi:queue("main:app")'``."""
+    generic.refuse_integrated(generic.load(target))
+    ske_logging.configure()
+    return InternalRoutes(TrustedProxy(_not_found), Routes(generic.queue_runner))
+
+
+def _not_found(environ: dict[str, Any], start_response: Callable[..., Any]) -> Iterable[bytes]:
+    content = NOT_FOUND.content()
+    start_response("404 Not Found", [("Content-Type", "application/json"), ("Content-Length", str(len(content)))])
+    return [b"" if environ.get("REQUEST_METHOD") == "HEAD" else content]
 
 
 def read_body(environ: dict[str, Any]) -> bytes:
