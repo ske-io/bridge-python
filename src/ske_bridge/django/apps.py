@@ -25,6 +25,12 @@ class SkeBridgeConfig(AppConfig):
             use_cache_prefix(settings)
 
     def ready(self) -> None:
+        from ske_bridge import jobs
+        from ske_bridge.django.middleware import connection_upkeep
+
+        # Jobs run off the platform get the connection upkeep they get on it.
+        jobs.set_around_job(connection_upkeep)
+
         if environment.running_on_platform():
             from django.conf import settings
 

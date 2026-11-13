@@ -70,6 +70,76 @@ def test_tasks_run_inside_an_app_context(platform, celery_app, publish, monkeypa
     assert seen == ["tests"]
 
 
+def test_jobs_run_inside_an_app_context_beside_tasks(app, publish):
+    import uuid
+
+    from ske_bridge.jobs import job
+    from ske_bridge.jobs.message import JobMessage, encode
+    from tests.celery_app import calls
+
+    seen = []
+
+    @job("flask-job")
+    async def handler(payload, ctx):
+        seen.append((payload, current_app.name))
+
+    body = encode(JobMessage("flask-job", [1], str(uuid.uuid4())))
+    response = queue(app.test_client(), [record(publish("tests.add", (2, 2)), message_id="task"), record(body, message_id="job")])
+
+    assert [(o["message_id"], o["deleted"]) for o in response.json["outcomes"]] == [("task", True), ("job", True)]
+    assert seen == [([1], "tests")]
+    assert calls == [("add", 2, 2)]
+
+
+def test_jobs_run_without_a_celery_app(platform, monkeypatch):
+    import uuid
+
+    from ske_bridge.jobs import job
+    from ske_bridge.jobs.message import JobMessage, encode
+
+    monkeypatch.delenv("SKE_CELERY_APP")
+    monkeypatch.setattr("celery._state._tls.current_app", None, raising=False)
+    monkeypatch.setattr("celery._state._get_active_apps", lambda: [])
+    seen = []
+    job("flask-only-job")(lambda payload, ctx: seen.append(current_app.name))
+
+    response = queue(make_app().test_client(), [record(encode(JobMessage("flask-only-job", None, str(uuid.uuid4()))))])
+
+    assert response.status_code == 200 and response.json["outcomes"][0]["deleted"]
+    assert seen == ["tests"]
+
+
+def test_a_job_dispatched_off_the_platform_runs_in_an_app_context(monkeypatch):
+    import threading
+
+    from flask import has_app_context
+
+    from ske_bridge.jobs import job
+
+    app = make_app()
+    seen = []
+    done = threading.Event()
+
+    @job("off-platform")
+    def handler(payload, ctx):
+        seen.append((payload, current_app.name))
+        done.set()
+
+    assert not has_app_context()
+    monkeypatch.setenv("SKE_QUEUE_SYNC", "1")
+    handler.dispatch("sync")
+    monkeypatch.delenv("SKE_QUEUE_SYNC")
+    handler.dispatch("scheduled")
+
+    assert done.wait(5)
+    for _ in range(100):
+        if len(seen) == 2:
+            break
+        threading.Event().wait(0.02)
+    assert seen == [("sync", "tests"), ("scheduled", "tests")]
+    assert app.name == "tests"
+
+
 def test_the_queue_reports_retries_and_failures(app, publish):
     response = queue(app.test_client(), [record(publish("tests.retry"), message_id="r"), record(publish("tests.fail"), message_id="f")])
 

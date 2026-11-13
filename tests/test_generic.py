@@ -2,6 +2,7 @@ import pytest
 
 from ske_bridge.forwarded import Origin, origin
 from ske_bridge.generic import AppImportError, NoQueueRunner, load, queue_runner
+from tests.conftest import record
 
 
 def test_load_follows_a_dotted_attribute():
@@ -30,13 +31,18 @@ def test_the_import_error_is_an_import_error():
     assert issubclass(AppImportError, ImportError)
 
 
-def test_without_a_named_celery_app_there_is_no_queue_runner():
-    with pytest.raises(NoQueueRunner, match="set SKE_CELERY_APP"):
-        queue_runner()
+def test_without_a_named_celery_app_or_a_job_a_batch_has_no_runner():
+    with pytest.raises(NoQueueRunner, match="set SKE_CELERY_APP .* or define jobs with ske_bridge.jobs"):
+        queue_runner().process([record("{}")])
 
 
-def test_the_named_celery_app_runs_the_queue(platform, celery_app):
-    assert queue_runner().app is celery_app
+def test_the_named_celery_app_runs_the_queue(platform, celery_app, publish):
+    runner = queue_runner()
+
+    [outcome] = runner.process([record(publish("tests.add", (1, 2)))])
+
+    assert outcome.deleted
+    assert runner.celery.app is celery_app
 
 
 @pytest.mark.parametrize(("headers", "scheme", "expected"), [

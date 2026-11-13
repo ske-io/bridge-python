@@ -162,7 +162,7 @@ def test_concurrent_batches_keep_their_own_task_state(wrapped, celery_app, publi
     def together(name, fail):
         # Both batches' tasks are running now; each must see its own run.
         barrier.wait()
-        runs[name] = wrapped.routes._runner._run
+        runs[name] = wrapped.routes._runner.celery._run
         barrier.wait()
         if fail:
             raise ValueError(name)

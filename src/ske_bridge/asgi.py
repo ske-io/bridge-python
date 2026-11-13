@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import time
 from collections.abc import Awaitable, Callable, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -97,12 +98,13 @@ class InternalRoutes:
 
         internal = header(scope, INTERNAL_HEADER)
         if path == QUEUE_PATH and method == "POST" and is_internal(internal):
+            received = time.monotonic()
             body = await _read_body(receive)
             if body is None:
                 # The platform gave up on the request: running the batch
                 # would answer no one, and it delivers the batch again.
                 return
-            reply = await self._in_queue_pool(self.routes.dispatch, method, path, internal, body)
+            reply = await self._in_queue_pool(self.routes.dispatch, method, path, internal, body, received)
         else:
             # Health, 404 and 405 answer at once, never behind a batch.
             reply = self.routes.dispatch(method, path, internal, b"")

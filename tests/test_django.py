@@ -112,6 +112,48 @@ def test_a_missing_celery_app_answers_500(client, publish, monkeypatch):
     assert "no Celery app" in response.json()["error"]
 
 
+def test_the_queue_runs_jobs_and_tasks_in_one_batch(client, publish):
+    import uuid
+
+    from ske_bridge.jobs import job
+    from ske_bridge.jobs.message import JobMessage, encode
+    from tests.celery_app import calls
+
+    seen = []
+
+    @job("django-job")
+    def handler(payload, ctx):
+        from django.db import connection
+
+        seen.append((payload, connection.vendor))
+
+    body = encode(JobMessage("django-job", {"user_id": 7}, str(uuid.uuid4())))
+    response = queue(client, [record(body, message_id="job"), record(publish("tests.add", (1, 1)), message_id="task")])
+
+    assert response.status_code == 200
+    assert [(o["message_id"], o["deleted"]) for o in response.json()["outcomes"]] == [("job", True), ("task", True)]
+    assert seen == [({"user_id": 7}, "sqlite")]
+    assert calls == [("add", 1, 1)]
+
+
+def test_the_queue_runs_jobs_without_a_celery_app(client, monkeypatch):
+    import uuid
+
+    from ske_bridge.celery import NoCeleryApp
+    from ske_bridge.jobs import job
+    from ske_bridge.jobs.message import JobMessage, encode
+
+    def no_app():
+        raise NoCeleryApp("no Celery app is configured")
+
+    monkeypatch.setattr("ske_bridge.celery.find_app", no_app)
+    job("django-only-job")(lambda payload, ctx: None)
+
+    response = queue(client, [record(encode(JobMessage("django-only-job", None, str(uuid.uuid4()))))])
+
+    assert response.status_code == 200 and response.json()["outcomes"][0]["deleted"]
+
+
 def test_health_answers_for_readiness(client):
     response = client.get("/__ske/health")
 

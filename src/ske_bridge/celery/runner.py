@@ -56,45 +56,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ske_bridge.celery.message import InvalidMessage, TaskMessage, decode
-from ske_bridge.celery.outcome import JobOutcome
+from ske_bridge.outcome import JobOutcome
+from ske_bridge.queue import MAX_RELEASE_DELAY, batch_deadline
 
 logger = logging.getLogger("ske_bridge")
-
-#: Seconds kept between the job timeout and the queue's timeout, for failing a
-#: task that ran out of time and answering the platform.
-TIMEOUT_MARGIN = 5
 
 #: The fewest seconds a task is started with. A message reached with less of
 #: the batch's time left is released for another invocation.
 MIN_START = 0.5
-
-#: The longest SQS hides a released message: 12 hours.
-MAX_RELEASE_DELAY = 43200
-
-
-def job_timeout(queue_timeout: int) -> int:
-    """The longest a batch may run on a queue with the given timeout."""
-    return max(1, queue_timeout - min(TIMEOUT_MARGIN, queue_timeout // 2))
-
-
-def batch_deadline(options: dict[str, Any]) -> float | None:
-    """When the batch must stop, on the ``time.monotonic()`` clock, or None
-    when the platform gives no limit.
-
-    ``deadline_ms`` is when the platform cuts the batch off, in Unix epoch
-    milliseconds; the margin is kept back from the time left until then, as
-    job_timeout() keeps it from a timeout. Without it the queue's ``timeout``
-    counts from now, when the batch arrived.
-    """
-    deadline_ms = options.get("deadline_ms")
-    if isinstance(deadline_ms, (int, float)) and not isinstance(deadline_ms, bool) and deadline_ms > 0:
-        left = deadline_ms / 1000 - time.time()
-        return time.monotonic() + left - min(TIMEOUT_MARGIN, max(left, 0) / 2)
-
-    timeout = options.get("timeout")
-    if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
-        return time.monotonic() + job_timeout(timeout)
-    return None
 
 
 class QueueRunner:
@@ -121,17 +90,20 @@ class QueueRunner:
     def _run(self, run: _Run | None) -> None:
         self._local.run = run
 
-    def process(self, records: list[Any], options: dict[str, Any] | None = None) -> list[JobOutcome]:
-        """One outcome per record, in the order they arrived."""
-        deadline = batch_deadline(options or {})
+    def process(self, records: list[Any], options: dict[str, Any] | None = None, received: float | None = None) -> list[JobOutcome]:
+        """One outcome per record, in the order they arrived; ``received``
+        as ske_bridge.queue.batch_deadline takes it."""
+        deadline = batch_deadline(options or {}, received)
+        return [self.run(r if isinstance(r, dict) else {}, deadline) for r in records]
+
+    def run(self, record: dict[str, Any], deadline: float | None) -> JobOutcome:
+        """One record's outcome, within the batch's ``deadline`` (see
+        ske_bridge.queue.batch_deadline), which a batch that also holds jobs
+        shares with them."""
         # Celery's current app is per thread: in a thread other than the one
         # that created the app, shared_task proxies and current_app would be
         # Celery's default app, which publishes nowhere the platform reads.
         self.app.set_current()
-
-        return [self._process_one(r if isinstance(r, dict) else {}, deadline) for r in records]
-
-    def _process_one(self, record: dict[str, Any], deadline: float | None) -> JobOutcome:
         message_id = str(record.get("message_id") or "")
         deliveries = _int(record.get("attempts"))
 

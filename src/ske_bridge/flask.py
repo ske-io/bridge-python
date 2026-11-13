@@ -16,18 +16,22 @@ platform's scheduler command.
 
 The Celery app is ``celery=``, else what ``SKE_CELERY_APP`` or ``CELERY_APP``
 names, else ``app.extensions["celery"]`` as Flask's Celery guide sets it,
-else the app the project made current; see ske_bridge.celery.find_app. Each task runs inside an application context.
+else the app the project made current; see ske_bridge.celery.find_app. Each
+job (ske_bridge.jobs) and each Celery task runs inside an application
+context, a job run off the platform included.
 """
 
 from __future__ import annotations
 
+import weakref
+from contextlib import nullcontext
 from typing import Any
 
 import click
 from flask import Flask, abort, current_app, request
 from flask.cli import with_appcontext
 
-from ske_bridge import cache, environment
+from ske_bridge import cache, environment, jobs
 from ske_bridge.forwarded import TRUSTED_HOPS
 from ske_bridge.mail import mail_service
 from ske_bridge.routes import Routes
@@ -44,6 +48,9 @@ class SkeBridge:
     def init_app(self, app: Flask) -> None:
         app.extensions["ske"] = self
         app.cli.add_command(ske)
+        # Jobs run off the platform get the app context they get on it. With
+        # several apps, the last one set up is the one they run in.
+        jobs.set_around_job(_app_context_of(weakref.ref(app)))
 
         if environment.running_on_platform():
             from werkzeug.middleware.proxy_fix import ProxyFix
@@ -67,9 +74,23 @@ class SkeBridge:
         return find_app(self.celery, app.extensions.get("celery"))
 
     def _runner(self, app: Flask) -> Any:
-        from ske_bridge.celery.runner import QueueRunner
+        """Runs the app's jobs (ske_bridge.jobs) and its Celery tasks, each
+        inside an application context; see ske_bridge.queue."""
+        from ske_bridge.celery.runner import QueueRunner as CeleryRunner
+        from ske_bridge.queue import QueueRunner
 
-        return QueueRunner(self.celery_app(app), around_job=app.app_context)
+        return QueueRunner(celery=lambda: CeleryRunner(self.celery_app(app), around_job=app.app_context), around_job=app.app_context)
+
+
+def _app_context_of(ref: weakref.ref[Flask]) -> Any:
+    """The app's application context, through a weak reference: the bridge
+    keeps no app alive that the application discarded."""
+
+    def around() -> Any:
+        app = ref()
+        return app.app_context() if app is not None else nullcontext()
+
+    return around
 
 
 def use_structured_logs(app: Flask) -> None:

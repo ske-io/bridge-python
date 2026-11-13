@@ -5,6 +5,7 @@ carry (see ske_bridge.logging)."""
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
@@ -19,8 +20,8 @@ from ske_bridge.routes import INTERNAL_HEADER, Routes, is_internal
 @contextmanager
 def connection_upkeep() -> Iterator[None]:
     """Closes database connections that are broken or past ``CONN_MAX_AGE``
-    around each task, as Celery's worker does for Django: one batch runs
-    several tasks in one request, and a connection one of them broke must not
+    around each job and task, as Celery's worker does for Django: one batch
+    runs several in one request, and a connection one of them broke must not
     fail the next."""
     from django.db import close_old_connections
 
@@ -31,11 +32,19 @@ def connection_upkeep() -> Iterator[None]:
         close_old_connections()
 
 
-def _runner():
+def _celery_runner():
     from ske_bridge.celery import find_app
     from ske_bridge.celery.runner import QueueRunner
 
     return QueueRunner(find_app(), around_job=connection_upkeep)
+
+
+def _runner():
+    """Runs the project's jobs (ske_bridge.jobs) and its Celery tasks; see
+    ske_bridge.queue."""
+    from ske_bridge.queue import QueueRunner
+
+    return QueueRunner(celery=_celery_runner, around_job=connection_upkeep)
 
 
 routes = Routes(_runner)
@@ -93,5 +102,6 @@ class InternalRoutesMiddleware:
         # read() rather than request.body: the body property refuses anything
         # past DATA_UPLOAD_MAX_MEMORY_SIZE (2.5 MB), which a full batch of SQS
         # messages can exceed.
-        reply = routes.dispatch(request.method or "GET", request.path_info, request.headers.get(INTERNAL_HEADER), request.read())
+        received = time.monotonic()
+        reply = routes.dispatch(request.method or "GET", request.path_info, request.headers.get(INTERNAL_HEADER), request.read(), received)
         return HttpResponse(reply.content(), status=reply.status, content_type="application/json")

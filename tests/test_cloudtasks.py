@@ -32,7 +32,7 @@ def gcp(platform, monkeypatch):
         sent.append((req.full_url, json.loads(req.data)["task"]))
         return io.BytesIO(b'{"name":"projects/test-project/locations/us-central1/queues/default/tasks/1"}')
 
-    monkeypatch.setattr("ske_bridge.celery.cloudtasks.urlopen", request)
+    monkeypatch.setattr("ske_bridge.cloudtasks.urlopen", request)
     app = Celery("cloudtasks-test", set_as_current=False)
     configure(app)
     yield app, sent, tokens
@@ -95,6 +95,6 @@ def test_dispatch_failure_is_reported_to_the_caller(gcp, monkeypatch):
     def refused(req, timeout):
         raise HTTPError(req.full_url, 403, "Forbidden", {}, None)
 
-    monkeypatch.setattr("ske_bridge.celery.cloudtasks.urlopen", refused)
+    monkeypatch.setattr("ske_bridge.cloudtasks.urlopen", refused)
     with pytest.raises(Exception, match="Forbidden"):
         app.send_task("not-sent", retry=False)

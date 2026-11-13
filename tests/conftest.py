@@ -35,8 +35,55 @@ def clean_env(monkeypatch):
     for key in (
         "SKE_PROJECT_TYPE", "SKE_ENVIRONMENT", "SKE_CELERY_APP", "CELERY_APP", "SKE_PROVIDER",
         "SQS_SUFFIX", "SQS_QUEUES", "SKE_SCHEDULED_AT", "MAIL_HOST", "MAIL_PORT",
+        "SQS_PREFIX", "SQS_QUEUE", "SKE_QUEUES", "SKE_QUEUE_PREFIX", "SKE_GCP_PROJECT", "SKE_REGION", "SKE_QUEUE_SYNC",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def cloud_tasks_token(monkeypatch):
+    """No access token is cached when a test starts."""
+    import ske_bridge.cloudtasks
+
+    token = {"value": "", "expires_at": 0.0}
+    monkeypatch.setattr(ske_bridge.cloudtasks, "_token", token)
+    return token
+
+
+@pytest.fixture(autouse=True)
+def defined_jobs(monkeypatch):
+    """The jobs defined while a test runs, forgotten after it: every test
+    starts with none, as an app that defines none does."""
+    import ske_bridge.jobs
+
+    from contextlib import nullcontext
+
+    jobs = {}
+    monkeypatch.setattr(ske_bridge.jobs, "_jobs", jobs)
+    monkeypatch.setattr(ske_bridge.jobs, "_around_job", nullcontext)
+    return jobs
+
+
+class StubJobsSQS:
+    """Stands in for boto3's SQS client for ske_bridge.jobs, keeping what it
+    was sent."""
+
+    def __init__(self, sent):
+        self.sent = sent
+
+    def send_message(self, **kwargs):
+        self.sent.append(kwargs)
+        return {"MessageId": f"j-{len(self.sent)}"}
+
+
+@pytest.fixture
+def jobs_sent(monkeypatch):
+    """The messages ske_bridge.jobs sends to SQS."""
+    import ske_bridge.jobs.send
+
+    sent = []
+    monkeypatch.setattr(ske_bridge.jobs.send, "sqs_client", lambda: StubJobsSQS(sent))
+    return sent
 
 
 @pytest.fixture
