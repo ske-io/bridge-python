@@ -258,7 +258,7 @@ def test_queue_enforces_the_batch_deadline_on_a_sync_worker(platform, publish):
     _, _, body = queue_only("tests.test_wsgi:app", records=[record(publish("tests.slow", (5,)))], timeout=2)
 
     outcome = json.loads(body)["outcomes"][0]
-    assert outcome["released"] and "batch's deadline" in outcome["error"]
+    assert outcome["failed"] and outcome["error"].startswith("TimeLimitExceeded")
     assert time.monotonic() - started < 1.5
 
 

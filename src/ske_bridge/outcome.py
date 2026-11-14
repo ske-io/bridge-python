@@ -6,7 +6,11 @@ delivery, which only the platform holds, so the bridge states the decision
 and the platform carries it out:
 
 - deleted: done; the message is acknowledged.
-- released: deliver it again, after ``release_delay`` seconds.
+- released: deliver it again, after ``release_delay`` seconds. The release
+  uses one of the job's tries, unless ``keeps_tries`` is set (with no delay):
+  the job was not started, or was cut short, because its batch ran out of
+  time, and the platform delivers the message again with its count of tries
+  kept. ``keeps_tries`` is sent only when set.
 - failed: it failed for good. Neither the bridge's jobs nor Celery keep a
   record that could run it again (a result backend stores a task's state and
   traceback, not a way to retry it), so every failure is also a dead letter:
@@ -32,9 +36,10 @@ class JobOutcome:
     dead_letter: bool = False
     attempts: int = 0
     error: str | None = None
+    keeps_tries: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "message_id": self.message_id,
             "deleted": self.deleted,
             "released": self.released,
@@ -44,14 +49,25 @@ class JobOutcome:
             "attempts": self.attempts,
             "error": self.error,
         }
+        if self.keeps_tries:
+            out["keeps_tries"] = True
+        return out
 
     @classmethod
     def success(cls, message_id: str, attempts: int = 0, error: str | None = None) -> JobOutcome:
         return cls(message_id=message_id, deleted=True, attempts=attempts, error=error)
 
     @classmethod
-    def release(cls, message_id: str, delay: int | None = None, attempts: int = 0, error: str | None = None) -> JobOutcome:
+    def release(cls, message_id: str, delay: int, attempts: int = 0, error: str | None = None) -> JobOutcome:
+        """A release that uses one of the job's tries, after ``delay``
+        seconds."""
         return cls(message_id=message_id, released=True, release_delay=delay, attempts=attempts, error=error)
+
+    @classmethod
+    def release_for_time(cls, message_id: str, attempts: int = 0, error: str | None = None) -> JobOutcome:
+        """A release that keeps the job's tries: its batch ran out of time
+        before it started, or cut it short. It is delivered again at once."""
+        return cls(message_id=message_id, released=True, attempts=attempts, error=error, keeps_tries=True)
 
     @classmethod
     def failure(cls, message_id: str, error: str, attempts: int = 0) -> JobOutcome:
