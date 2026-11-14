@@ -6,6 +6,7 @@ the application with the request id the logs carry (see ske_bridge.logging)."""
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable
 from http import HTTPStatus
 from typing import Any
@@ -54,11 +55,13 @@ class InternalRoutes:
                 return [b"" if environ.get("REQUEST_METHOD") == "HEAD" else page]
             return self.app(environ, start_response)
 
+        received = time.monotonic()
         reply = self.routes.dispatch(
             environ.get("REQUEST_METHOD", "GET"),
             path,
             environ.get("HTTP_X_SKE_INTERNAL"),
             read_body(environ),
+            received,
         )
 
         content = reply.content()

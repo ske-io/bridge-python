@@ -5,7 +5,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ske_bridge.celery.runner import QueueRunner, _Run, batch_deadline, job_timeout
+from ske_bridge.celery.runner import QueueRunner, _Run
+from ske_bridge.queue import batch_deadline, job_timeout
 from tests.conftest import envelope, fixture, record
 
 KEYS = ["message_id", "deleted", "released", "release_delay", "failed", "dead_letter", "attempts", "error"]

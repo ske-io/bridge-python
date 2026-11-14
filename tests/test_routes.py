@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from ske_bridge.celery.outcome import JobOutcome
+from ske_bridge.outcome import JobOutcome
 from ske_bridge.routes import Routes, is_internal
 
 
@@ -10,8 +10,8 @@ class FakeRunner:
     def __init__(self):
         self.calls = []
 
-    def process(self, records, options=None):
-        self.calls.append((records, options))
+    def process(self, records, options=None, received=None):
+        self.calls.append((records, options, received))
         return [JobOutcome.success(r["message_id"], attempts=1) for r in records]
 
 
@@ -49,6 +49,12 @@ def test_the_queue_answers_the_platforms_shape(routes, runner):
         ],
     }
     assert runner.calls[0][1] == {"timeout": 60, "tries": 3}
+
+
+def test_the_batch_counts_from_when_the_request_arrived(routes, runner):
+    routes.dispatch("POST", "/__ske/queue", "true", queue_body("a"), 1234.5)
+
+    assert runner.calls[0][2] == 1234.5
 
 
 @pytest.mark.parametrize("header", [None, "false", "1"])

@@ -21,15 +21,11 @@ import sys
 from typing import Any
 
 from ske_bridge import environment
-from ske_bridge.routes import Runner
+from ske_bridge.queue import NO_RUNNER, NoQueueRunner, QueueRunner
 
 
 class AppImportError(ImportError):
     """The import string names no app that can be imported."""
-
-
-class NoQueueRunner(LookupError):
-    """Nothing in this app runs queued jobs."""
 
 
 class AlreadyIntegrated(TypeError):
@@ -63,24 +59,29 @@ def load(target: str) -> Any:
     return app
 
 
-def queue_runner() -> Runner:
-    """What runs the jobs ``/__ske/queue`` delivers: the Celery app
-    ``SKE_CELERY_APP`` or ``CELERY_APP`` names, as ``celery -A`` takes it.
+def queue_runner() -> QueueRunner:
+    """What runs the messages ``/__ske/queue`` delivers: the jobs the app
+    defines with ske_bridge.jobs, and Celery tasks through the Celery app
+    ``SKE_CELERY_APP`` or ``CELERY_APP`` names, as ``celery -A`` takes it
+    (see ske_bridge.queue).
 
-    With neither set it raises NoQueueRunner, which the queue route answers
-    with a 500 that names it, so the platform delivers the batch again once
-    the deployment is fixed and its dead-letter queue keeps what never runs:
-    the same answer as for a Celery app that cannot be found."""
+    With no job defined and neither variable set, a batch raises
+    NoQueueRunner, which the queue route answers with a 500 that names it, so
+    the platform delivers the batch again once the deployment is fixed and
+    its dead-letter queue keeps what never runs: the same answer as for a
+    Celery app that cannot be found."""
+    return QueueRunner(celery=celery_runner)
+
+
+def celery_runner() -> Any:
+    """The Celery runner for the app ``SKE_CELERY_APP`` or ``CELERY_APP``
+    names; NoQueueRunner without either."""
     if environment.get("SKE_CELERY_APP") or environment.get("CELERY_APP"):
         from ske_bridge.celery import find_app
-        from ske_bridge.celery.runner import QueueRunner
+        from ske_bridge.celery.runner import QueueRunner as CeleryRunner
 
-        return QueueRunner(find_app())
-
-    raise NoQueueRunner(
-        "nothing runs queued jobs in this app: set SKE_CELERY_APP to its Celery app "
-        "as celery -A names it (for example proj.celery:app)"
-    )
+        return CeleryRunner(find_app())
+    raise NoQueueRunner(NO_RUNNER)
 
 
 def refuse_integrated(app: Any) -> None:

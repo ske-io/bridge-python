@@ -23,6 +23,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -36,7 +37,7 @@ HEALTH_PATH = "/__ske/health"
 
 
 class Runner(Protocol):
-    def process(self, records: list[Any], options: dict[str, Any] | None = None) -> list[Any]: ...
+    def process(self, records: list[Any], options: dict[str, Any] | None = None, received: float | None = None) -> list[Any]: ...
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,11 @@ class Routes:
     def handles(path: str) -> bool:
         return path.startswith(PREFIX)
 
-    def dispatch(self, method: str, path: str, internal: str | None, body: bytes) -> Reply:
+    def dispatch(self, method: str, path: str, internal: str | None, body: bytes, received: float | None = None) -> Reply:
+        """Answers one request. ``received`` is when it arrived, on the
+        ``time.monotonic()`` clock (now by default): a batch's time counts
+        from then, reading its body included."""
+        received = time.monotonic() if received is None else received
         if path == HEALTH_PATH:
             if method not in ("GET", "HEAD"):
                 return Reply(405, {"error": "method not allowed"})
@@ -91,11 +96,11 @@ class Routes:
         if path == QUEUE_PATH:
             if method != "POST":
                 return Reply(405, {"error": "method not allowed"})
-            return self._queue(body)
+            return self._queue(body, received)
 
         return NOT_FOUND
 
-    def _queue(self, body: bytes) -> Reply:
+    def _queue(self, body: bytes, received: float) -> Reply:
         """Runs a batch: ``{"source", "records": [...], "options": {...}}`` in,
         ``{"processed", "outcomes": [...]}`` out.
 
@@ -121,7 +126,7 @@ class Routes:
         try:
             if self._runner is None:
                 self._runner = self._make_runner()
-            outcomes = self._runner.process(records, options)
+            outcomes = self._runner.process(records, options, received)
         except Exception as e:
             logger.exception("ske: the queue cannot run jobs")
             return Reply(500, {"error": f"{type(e).__name__}: {e}"})
