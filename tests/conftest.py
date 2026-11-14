@@ -36,6 +36,7 @@ def clean_env(monkeypatch):
         "SKE_PROJECT_TYPE", "SKE_ENVIRONMENT", "SKE_CELERY_APP", "CELERY_APP", "SKE_PROVIDER",
         "SQS_SUFFIX", "SQS_QUEUES", "SKE_SCHEDULED_AT", "MAIL_HOST", "MAIL_PORT",
         "SQS_PREFIX", "SQS_QUEUE", "SKE_QUEUES", "SKE_QUEUE_PREFIX", "SKE_GCP_PROJECT", "SKE_REGION", "SKE_QUEUE_SYNC",
+        "SKE_APP", "MAINTENANCE_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -62,6 +63,32 @@ def defined_jobs(monkeypatch):
     monkeypatch.setattr(ske_bridge.jobs, "_jobs", jobs)
     monkeypatch.setattr(ske_bridge.jobs, "_around_job", nullcontext)
     return jobs
+
+
+@pytest.fixture(autouse=True)
+def scheduled_tasks(monkeypatch):
+    """The scheduled tasks defined while a test runs, forgotten after it."""
+    import ske_bridge.schedule
+
+    tasks = {}
+    monkeypatch.setattr(ske_bridge.schedule, "_tasks", tasks)
+    return tasks
+
+
+@pytest.fixture(autouse=True)
+def no_local_jobs_session():
+    """No test leaves a drain of local jobs open for the next."""
+    yield
+    from ske_bridge.jobs import local
+
+    local.settle(0)
+
+
+def define_task(expression, name, handler=None, **options):
+    """Defines the scheduled task ``name``, a no-op unless ``handler``."""
+    from ske_bridge import schedule
+
+    schedule.cron(expression, name=name, **options)(handler or (lambda: None))
 
 
 class StubJobsSQS:

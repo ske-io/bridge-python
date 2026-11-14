@@ -142,13 +142,15 @@ def test_a_failed_send_is_reported_and_does_not_stop_the_rest(celery_app, monkey
     assert not result.ok
 
 
-def test_nothing_due_says_so(celery_app, monkeypatch):
+def test_nothing_due_is_a_debug_line(celery_app, monkeypatch, caplog):
     monkeypatch.setitem(celery_app.conf, "beat_schedule", {})
     lines = []
 
-    tick(celery_app, MONDAY_0930_PARIS, echo=lines.append)
+    with caplog.at_level("DEBUG", logger="ske_bridge"):
+        tick(celery_app, MONDAY_0930_PARIS, echo=lines.append)
 
-    assert lines == ["nothing due"]
+    assert lines == []
+    assert [record.getMessage() for record in caplog.records] == ["ske: nothing due"]
 
 
 def test_what_the_scheduler_sends_the_queue_runs(celery_app, sqs_sent):

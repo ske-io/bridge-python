@@ -160,6 +160,13 @@ def set_around_job(around: Callable[[], AbstractContextManager[Any]] | None) -> 
     _around_job = around or nullcontext
 
 
+def _around() -> AbstractContextManager[Any]:
+    """A new context of what the framework integration runs every job inside
+    (see set_around_job()): a Flask app context, Django's connection upkeep,
+    or nothing. Scheduled tasks run inside one each, too."""
+    return _around_job()
+
+
 def dispatch(name: str, payload: Any = None, *, delay: int = 0, queue: str | None = None) -> str:
     """Runs the job ``name`` with ``payload`` later, and returns the job's id
     once it is queued.
@@ -216,7 +223,13 @@ def call(handler: Handler, payload: Any, ctx: JobContext) -> Any:
     """Calls a handler, sync or async, to its end, with no time limit: an
     async handler runs in an event loop of its own, in a thread of its own
     when this thread already runs one."""
-    result = handler(payload, ctx)
+    return _finish(handler(payload, ctx), f"ske-job-{ctx.name}")
+
+
+def _finish(result: Any, thread_name: str) -> Any:
+    """``result`` itself, or, when it is awaitable, what it comes to: awaited
+    in an event loop of its own, in a thread of its own (``thread_name``)
+    when this thread already runs one."""
     if not inspect.isawaitable(result):
         return result
 
@@ -237,7 +250,7 @@ def call(handler: Handler, payload: Any, ctx: JobContext) -> Any:
         except BaseException as e:
             outcome["error"] = e
 
-    thread = threading.Thread(target=in_thread, name=f"ske-job-{ctx.name}")
+    thread = threading.Thread(target=in_thread, name=thread_name)
     thread.start()
     thread.join()
     if "error" in outcome:

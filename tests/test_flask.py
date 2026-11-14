@@ -1,12 +1,15 @@
 import json
+import time
 from pathlib import Path
 
 import pytest
 from celery import Celery
 from flask import Blueprint, Flask, current_app
 
+from ske_bridge.celery import NoCeleryApp
 from ske_bridge.flask import SkeBridge
-from tests.conftest import record
+from ske_bridge.jobs import job
+from tests.conftest import define_task, record
 
 
 STATIC = Path(__file__).parent / "fixtures" / "static"
@@ -215,6 +218,80 @@ def test_flask_ske_schedule_exits_non_zero_on_a_failed_send(app, celery_app, mon
 
     assert result.exit_code == 1
     assert "failed bad" in result.output
+
+
+def test_flask_ske_schedule_runs_the_tasks_and_fails_with_one(monkeypatch):
+    app = Flask("tests")
+    SkeBridge(app)
+    monkeypatch.setattr(SkeBridge, "celery_app", lambda self, app: (_ for _ in ()).throw(NoCeleryApp("none")))
+    monkeypatch.setenv("SKE_SCHEDULED_AT", "2026-03-04T10:01:00Z")
+    seen = []
+    define_task("* * * * *", "native", lambda: seen.append(current_app.name))
+
+    result = app.test_cli_runner().invoke(args=["ske", "schedule"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("ran native in ")
+    # Tasks run in the app's context.
+    assert seen == ["tests"]
+
+    define_task("* * * * *", "broken", lambda: 1 / 0)
+    result = app.test_cli_runner().invoke(args=["ske", "schedule"])
+    assert result.exit_code == 1
+    assert "1 scheduled task(s) failed: broken" in result.output
+
+
+def test_flask_ske_schedule_waits_for_local_jobs(monkeypatch):
+    app = Flask("tests")
+    SkeBridge(app)
+    monkeypatch.setattr(SkeBridge, "celery_app", lambda self, app: (_ for _ in ()).throw(NoCeleryApp("none")))
+    seen = []
+
+    @job("in-context")
+    def in_context(payload, ctx):
+        time.sleep(0.05)
+        seen.append(current_app.name)
+
+    define_task("* * * * *", "dispatches", lambda: in_context.dispatch())
+
+    result = app.test_cli_runner().invoke(args=["ske", "schedule"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == ["tests"]
+
+
+def test_flask_ske_schedule_runs_each_task_in_an_app_context_of_its_own(monkeypatch):
+    from flask import g
+
+    app = Flask("tests")
+    SkeBridge(app)
+    monkeypatch.setattr(SkeBridge, "celery_app", lambda self, app: (_ for _ in ()).throw(NoCeleryApp("none")))
+    seen = []
+
+    def first():
+        g.user = "set by the first task"
+
+    def second():
+        seen.append((current_app.name, getattr(g, "user", None)))
+
+    define_task("* * * * *", "first", first)
+    define_task("* * * * *", "second", second)
+
+    result = app.test_cli_runner().invoke(args=["ske", "schedule"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == [("tests", None)]
+
+
+def test_flask_ske_schedule_without_tasks_or_a_celery_app_names_both(monkeypatch):
+    app = Flask("tests")
+    SkeBridge(app)
+    monkeypatch.setattr(SkeBridge, "celery_app", lambda self, app: (_ for _ in ()).throw(NoCeleryApp("none")))
+
+    result = app.test_cli_runner().invoke(args=["ske", "schedule"])
+
+    assert result.exit_code == 1
+    assert "no scheduled tasks are defined" in result.output and "no Celery app is configured" in result.output
 
 
 FORWARDED = {

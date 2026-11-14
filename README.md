@@ -1,6 +1,6 @@
 # ske-bridge
 
-Runs a Django, Flask or any other WSGI or ASGI application on SKE: it answers the platform's internal routes inside the application, runs background jobs and delivered Celery tasks, and turns the Celery beat schedule into the command the platform runs every minute.
+Runs a Django, Flask or any other WSGI or ASGI application on SKE: it answers the platform's internal routes inside the application, runs background jobs and delivered Celery tasks, and runs scheduled tasks and the Celery beat schedule from the command the platform runs every minute.
 
 Everything is inert off the platform (when neither `SKE_PROJECT_TYPE` nor `SKE_ENVIRONMENT` is set), so the package is safe to install unconditionally.
 
@@ -100,9 +100,13 @@ The bridge trusts exactly that one hop, and only on the platform; off it, nothin
 
 ## Maintenance mode
 
-Turn maintenance mode on for an environment in the SKE dashboard. The platform redeploys it with `MAINTENANCE_MODE=true`, and every web request is answered `503 Service Unavailable` with your `503.html` template (Django's template loaders, or Flask's `templates/` folder), or a minimal page when you have none. The readiness check, jobs and queued tasks keep working; the scheduler sends no beat entries, except those marked to run anyway:
+Turn maintenance mode on for an environment in the SKE dashboard. The platform redeploys it with `MAINTENANCE_MODE=true`, and every web request is answered `503 Service Unavailable` with your `503.html` template (Django's template loaders, or Flask's `templates/` folder), or a minimal page when you have none. The readiness check, jobs and queued tasks keep working; the scheduler runs no scheduled task and sends no beat entry, except those marked to run anyway:
 
 ```python
+@schedule.hourly(even_in_maintenance=True)
+def cleanup():
+    ...
+
 app.conf.beat_schedule = {
     "cleanup": {"task": "proj.tasks.cleanup", "schedule": 3600, "options": {"ske_even_in_maintenance": True}},
 }
@@ -165,7 +169,7 @@ Where the job runs:
 
 - **On the platform, on AWS**, `dispatch()` sends the job to the environment's SQS queue: `{SQS_PREFIX}/{name}{SQS_SUFFIX}`, where the name is `queue`, else `SQS_QUEUE`, else `default`. The names allowed are Celery's: the default queue and those `SQS_QUEUES` lists; any other is refused. The region is `AWS_REGION`, else `AWS_DEFAULT_REGION`, and the credentials are the function's role. boto3 is imported on the first dispatch.
 - **On the platform, on GCP**, it creates a task in the environment's Cloud Tasks queue, as the [Celery](#celery) transport does: `{SKE_QUEUE_PREFIX}{name}` in `SKE_GCP_PROJECT` at `SKE_REGION`, where the name is `queue`, else `default`, and only names `SKE_QUEUES` lists are allowed (with none listed, none is). A delay becomes the task's schedule time. The access token comes from Cloud Run's metadata server, and is fetched again a minute before it expires; no Google SDK is needed. A refusal raises `ske_bridge.cloudtasks.CloudTasksError` with the HTTP status and the reply's body; a `429` or `5xx` is `CloudTasksUnavailable`, which is also a `URLError`.
-- **Off the platform**, `dispatch()` runs the handler in your process once the delay has passed, and logs an error it raises. One background thread runs these jobs one at a time, in the order they fall due, as the platform runs a batch. The thread doesn't keep the process alive, so a script or command that exits first drops the jobs not run yet. With `SKE_QUEUE_SYNC=1` it runs the handler before `dispatch()` returns, and an error it raises is raised by `dispatch()`, which is what tests want. Either way a Flask app's jobs run in an application context and a Django project's with its database connection upkeep, as on the platform; with several Flask apps, the one set up last.
+- **Off the platform**, `dispatch()` runs the handler in your process once the delay has passed, and logs an error it raises. One background thread runs these jobs one at a time, in the order they fall due, as the platform runs a batch. The thread doesn't keep the process alive, so a script or command that exits first drops the jobs not run yet; the scheduler command waits for the jobs its tasks dispatched (see [Schedule](#schedule)). With `SKE_QUEUE_SYNC=1` it runs the handler before `dispatch()` returns, and an error it raises is raised by `dispatch()`, which is what tests want. Either way a Flask app's jobs run in an application context and a Django project's with its database connection upkeep, as on the platform; with several Flask apps, the one set up last.
 
 The message body is `{"job":"send-welcome-mail","payload":{"user_id":7},"id":"<uuid>"}`; the id is made once by `dispatch()` and stays the same on every delivery, so a handler can use it to do its work only once.
 
@@ -244,14 +248,72 @@ Time limits are a worker's: at a task's soft limit it gets `SoftTimeLimitExceede
 
 Only task protocol 2 (Celery's default since 4.0) is supported, and the message body is decoded with the app's `accept_content`.
 
-## Beat schedule
+## Schedule
 
-No beat process runs. Once a minute the platform runs the scheduler command for your framework:
+```python
+# shop/schedule.py
+from ske_bridge import schedule
+
+from shop.jobs import send_digest   # the jobs the tasks dispatch
+
+@schedule.cron("0 3 * * *", time_zone="Europe/Paris")
+def prune_sessions():
+    ...
+
+@schedule.cron("*/15 * * * *", name="send-digest")
+def queue_digest():
+    send_digest.dispatch({})
+
+@schedule.daily(at="02:00", even_in_maintenance=True)
+async def nightly_report():
+    ...
+```
+
+No timer runs in your app. Once a minute the platform runs the scheduler command, which imports your app, runs the tasks due in that minute one after the other, waits for each to finish, and exits; it exits non-zero when any due task failed, and a failing task doesn't stop the others, whatever it raises (`SystemExit` and a cancellation included; only `KeyboardInterrupt` stops the run). It prints a line for each task it ran, skipped or saw fail, and nothing when nothing was due. The command is:
 
 - Django: `python manage.py ske_schedule`
 - Flask: `flask ske schedule`
+- Any other app: `ske-bridge schedule`, which imports the app named by `SKE_APP`, or by `--app`, as a `module:attribute` import string (`ske-bridge schedule --app main:app`). It puts the current directory first on `sys.path`, ahead of `PYTHONPATH`, and only imports the app: it neither wraps nor serves it. It exits 1 when the app can't be imported, and 2 on a usage error or when the app is a Flask app or configures a Django project, whose schedules run with the commands above. With no app named (and no Celery app, below) there is nothing to run, and it exits 0.
 
-Each run sends the `beat_schedule` entries due in the minute it was scheduled for (the platform passes it as `SKE_SCHEDULED_AT`; without it, the current minute) (including those added with `add_periodic_task`) and exits; it exits non-zero if an entry could not be sent. Due is decided from the minute alone:
+A task is a function, sync or async, that takes no arguments; an async one runs in an event loop of its own. Each runs inside a context of its own, as each [job](#jobs) does: a Flask application context, so `g` never carries over from one task to the next, or, for Django, with database connections that are broken or past `CONN_MAX_AGE` closed before and after it. Each decorator adds the function to the schedule and returns it unchanged, so you can still call it; it needs its parentheses (`@schedule.every_minute()`, not `@schedule.every_minute`), and says so when they're missing. A task is known only once the module defining it is imported, so define tasks where the scheduler command imports them, as for [jobs](#jobs): in a Django app's module imported from its `AppConfig.ready()`, in a module your Flask app (or its factory) imports, or in a module the module named by `SKE_APP` imports.
+
+| Decorator | Runs |
+|---|---|
+| `@schedule.cron(expression)` | in the minutes the expression matches |
+| `@schedule.every_minute()` | every minute, `* * * * *` |
+| `@schedule.hourly(minute=0)` | every hour at that minute, `0 * * * *` |
+| `@schedule.daily(at="00:00")` | every day at that time, `0 0 * * *` |
+| `@schedule.weekdays(at="00:00")` | Monday to Friday, `0 0 * * 1-5` |
+| `@schedule.weekends(at="00:00")` | Saturday and Sunday, `0 0 * * 0,6` |
+| `@schedule.weekly(day="sun", at="00:00")` | once a week on that day (0 or 7 for Sunday to 6, or `"mon"`), `0 0 * * sun` |
+| `@schedule.monthly(day=1, at="00:00")` | once a month on that day; a month without it is skipped, `0 0 1 * *` |
+| `@schedule.yearly(month=1, day=1, at="00:00")` | once a year on that day, `0 0 1 1 *` |
+
+Every decorator also takes:
+
+- `name`: the task's name in the command's output; by default the function's module and qualified name (`shop.schedule.prune_sessions`). A name already taken is an error, except by the same module-level function defined again (the same source file and qualified name, as when a module is imported twice, or under two names), which replaces the first.
+- `time_zone`: the time zone the expression is read in, an IANA name (`"Europe/Paris"`) or a `tzinfo`; your process's own time zone by default, which on the platform is UTC unless you set `TZ`. In Django the process's time zone is your `TIME_ZONE` setting, which Django applies to the process when it starts (`America/Chicago` unless you set it), so that is the default there. On a system without a time zone database, install `tzdata`.
+- `even_in_maintenance`: run the task while the app is in maintenance mode too. Otherwise it is skipped while maintenance mode is on.
+
+An expression has five fields (minute, hour, day of month, month, day of week) or six with seconds first. Fields take `*`, numbers, ranges (`1-5`), steps (`*/15`, `5/15`, `1-30/5`) and lists, and month and day names (`jan`, `mon-fri`); Sunday is 0 or 7. `@hourly`, `@daily`, `@midnight`, `@weekly`, `@monthly`, `@yearly`, `@annually`, `@minutely`, `@weekdays` and `@weekends` work too. When both day fields are restricted, a day matching either is due, as in classic cron; a day field written to cover every value (`*`, `*/1`, `1-31`, `0-6`) is not restricted. The decorators check the expression, the time zone and the name when your module is imported, so a mistake fails the command rather than skip the task silently.
+
+Due is decided from the minute alone, in the task's time zone:
+
+- The minute is the one the platform scheduled the run for, which it passes as `SKE_SCHEDULED_AT`, so a run that starts late or is retried runs that minute's tasks; without it, the clock's.
+- Daylight saving time applies in a time zone that has it. When clocks go back, the repeated hour's minutes are due twice, so `30 1 * * *` in `America/New_York` runs twice that night. When clocks go forward, the skipped hour never happens, so a task in it does not run that day. Use `UTC` to avoid both.
+- The schedule cannot be finer than a minute. An expression matching more than one second of a minute (`*/30 * * * * *`) runs once a minute, with a warning naming the task.
+- A tick delivered twice runs its tasks twice, so a task that must never run twice guards itself, as it would with more than one scheduler.
+- Runs don't wait for each other: a task that takes longer than a minute is still running when the next minute's run starts it again. Keep tasks short; for longer work, have the task `dispatch()` a [job](#jobs).
+
+A task that dispatches jobs only queues them on the platform, where the queue runs them. Run off the platform (the command on your machine), those jobs run in the command's own process, so it waits for them, and for the jobs they dispatch in turn, before it exits: at most 60 seconds. `ske-bridge schedule` also waits for jobs dispatched while it imports the app; `manage.py ske_schedule` and `flask ske schedule` start counting once the app has loaded, so a job dispatched while it loads isn't waited for. A job that fails, is still running when the wait ends, or would start after it (a long `delay`) fails the run, named in the output; one that would start after it fails the run at once rather than at the end of the wait. The wait can't interrupt a job: one still running when it ends is stopped by the command's exit. Only the platform's queue enforces a job's time limit (see [Jobs](#jobs)).
+
+### With the Celery beat schedule
+
+An app can have both scheduled tasks and a Celery `beat_schedule`; each run handles both. It sends the beat entries due first (sending is quick, so a slow task never holds them up), then runs the tasks due. The run exits non-zero when the beat schedule couldn't run (its Celery app or schedule is broken) or an entry could not be sent, a task failed, or, off the platform, a dispatched job failed or didn't finish; one failure doesn't stop the rest, so the tasks run even when the beat schedule can't. An app with scheduled tasks needs no Celery app: when Celery isn't installed or no Celery app is configured, only the tasks run. An app with neither fails, saying that no scheduled tasks are defined and no Celery app is configured; check that the module defining the tasks is imported. `ske-bridge schedule` looks for a Celery app only when `SKE_CELERY_APP` (or `CELERY_APP`) names one, as the queue does for such an app.
+
+## Beat schedule
+
+No beat process runs. Each run of the scheduler command (see [Schedule](#schedule)) sends the `beat_schedule` entries due in the minute it was scheduled for (the platform passes it as `SKE_SCHEDULED_AT`; without it, the current minute), including those added with `add_periodic_task`; it exits non-zero if an entry could not be sent. Due is decided from the minute alone:
 
 - `crontab` entries are due when the minute matches, in the app's `timezone`.
 - Interval entries (seconds, `timedelta`) are due when the minutes since Monday 1970-01-05 00:00 UTC are a multiple of the interval, rounded down to whole minutes: hourly at the top of the hour, daily at 00:00 UTC, weekly on Mondays at 00:00 UTC; 90 seconds runs every minute. An interval under a minute runs once a minute, with a warning in the log.

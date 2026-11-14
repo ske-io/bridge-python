@@ -1,16 +1,17 @@
-"""``python manage.py ske_schedule``: the platform's scheduler command. It sends
-the Celery beat entries due this minute; see ske_bridge.celery.scheduler."""
+"""``python manage.py ske_schedule``: the platform's scheduler command. It
+sends the Celery beat entries due this minute and runs the scheduled tasks
+(ske_bridge.schedule) due; see ske_bridge.schedule.command."""
 
 from django.core.management.base import BaseCommand, CommandError
 
 from ske_bridge.celery import find_app
-from ske_bridge.celery.scheduler import tick
+from ske_bridge.schedule.command import run
 
 
 class Command(BaseCommand):
-    help = "Send the Celery beat schedule's entries that are due this minute."
+    help = "Send the Celery beat schedule's entries and run the scheduled tasks that are due this minute."
 
     def handle(self, *args, **options):
-        result = tick(find_app(), echo=self.stdout.write)
+        result = run(find_app, echo=self.stdout.write)
         if not result.ok:
-            raise CommandError(f"{len(result.failed)} scheduled task(s) could not be sent")
+            raise CommandError(result.failure)

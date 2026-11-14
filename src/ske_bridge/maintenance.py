@@ -24,8 +24,9 @@ What keeps working:
   lets that browser in for 12 hours. It is signed with the secret, so it
   stops working when the secret changes, and cannot be made without it.
 
-The scheduler sends no beat entries while maintenance is on, except entries
-marked to run anyway; see ske_bridge.celery.scheduler.
+The scheduler runs no scheduled task and sends no beat entry while
+maintenance is on, except those marked to run anyway; see
+ske_bridge.schedule.tick and ske_bridge.celery.scheduler.
 """
 
 from __future__ import annotations
