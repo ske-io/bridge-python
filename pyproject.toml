@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ske-bridge"
-version = "0.1.1"
+dynamic = ["version"]
 description = "Runs any WSGI or ASGI application on SKE, with its background jobs, scheduled tasks, queued Celery tasks and beat schedule, and integrates with Django and Flask."
 readme = "README.md"
 license = "MIT"
@@ -46,6 +46,15 @@ dev = [
     "flask>=3.0",
     "celery[sqs]>=5.3",
 ]
+
+# The version comes from the git tag: a release tagged v0.1.2 builds 0.1.2,
+# and a build between tags gets a development version (0.1.3.dev4). No local
+# part (+g1a2b3c), which package indexes refuse.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ske_bridge"]

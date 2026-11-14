@@ -20,25 +20,28 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # The version comes from the latest tag (see pyproject.toml), so the
+          # build needs the history and tags, not just this commit.
+          fetch-depth: 0
 
       - name: Setup uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
-      # PyPI never takes a version twice, so a release tag that disagrees with
-      # pyproject.toml stops here rather than publishing the wrong version.
-      - name: Check the release tag
+      - name: Build
+        run: uv build
+
+      # PyPI never takes a version twice, so a release whose tag isn't
+      # v<version> (a typo, a tag on another commit) stops here rather than
+      # publishing a development version.
+      - name: Check the release version
         if: github.event_name == 'release'
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          version="$(uv version --short)"
-          if [ "$TAG" != "v$version" ]; then
-            echo "::error::Release tag $TAG does not match pyproject.toml version v$version"
+          if [ ! -f "dist/ske_bridge-${TAG#v}.tar.gz" ]; then
+            echo "::error::Release $TAG built $(ls dist), not ske_bridge-${TAG#v}"
             exit 1
           fi
-
-      - name: Build
-        run: uv build
 
       - name: Upload distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
