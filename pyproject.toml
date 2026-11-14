@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ske-bridge"
-version = "0.1.1"
+version = "0.1.2"
 description = "Runs any WSGI or ASGI application on SKE, with its background jobs, queued Celery tasks and beat schedule, and integrates with Django and Flask."
 readme = "README.md"
 license = "MIT"

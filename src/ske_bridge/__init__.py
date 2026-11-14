@@ -11,4 +11,4 @@ Everything is inert off-platform, so the package is safe to install
 unconditionally.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
