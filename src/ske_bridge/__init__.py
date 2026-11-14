@@ -13,4 +13,9 @@ Everything is inert off-platform, so the package is safe to install
 unconditionally.
 """
 
-__version__ = "0.1.1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("ske-bridge")
+except PackageNotFoundError:  # imported from a source tree that isn't installed
+    __version__ = "0+unknown"
