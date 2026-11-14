@@ -73,21 +73,53 @@ def batch_deadline(options: dict[str, Any], received: float | None = None) -> fl
     when the platform gives no limit.
 
     ``deadline_ms`` is when the platform cuts the batch off, in Unix epoch
-    milliseconds; the margin is kept back from the time left until then, as
-    job_timeout() keeps it from a timeout. Without it the queue's ``timeout``
-    counts from ``received`` (``time.monotonic()``), when the batch arrived,
-    by default now.
+    milliseconds; the margin is kept back from the time that was left until
+    then when the batch arrived, as job_timeout() keeps it from a timeout.
+    Without it the queue's ``timeout`` counts from ``received``
+    (``time.monotonic()``), when the batch arrived, by default now.
     """
-    received = time.monotonic() if received is None else received
+    now = time.monotonic()
+    received = now if received is None else received
     cutoff_ms = deadline_ms(options)
     if cutoff_ms is not None:
         left = cutoff_ms / 1000 - time.time()
-        return time.monotonic() + left - min(TIMEOUT_MARGIN, max(left, 0) / 2)
+        at_arrival = left + (now - received)
+        return now + left - min(TIMEOUT_MARGIN, max(at_arrival, 0) / 2)
 
     timeout = options.get("timeout")
     if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
         return received + job_timeout(timeout)
     return None
+
+
+#: The most of a job's full time that earlier work in its batch may take with
+#: the job still owning a timeout, in seconds (see cut_by_batch).
+MAX_CUT_SLACK = 1.0
+
+
+def cut_by_batch(left: float, own: float | None, whole: float) -> bool:
+    """Whether the batch's deadline, ``left`` seconds away as a job starts,
+    cuts the job short of its full time because earlier work in the batch
+    used that time up.
+
+    A job's full time is what it gets as the batch's first: its own limit
+    ``own`` (None when it has none), or the batch's ``whole`` time (from when
+    the batch arrived to its deadline) when that is shorter. The platform's
+    deadline comes from its own timeout, which is the queue's, less a margin
+    it keeps for answering, and reaching the bridge takes a moment more; so
+    on the platform the whole batch is a little shorter than a job's own
+    limit, and a first job runs to the batch's deadline. Running into it is
+    still the job's own timeout, which uses a try.
+
+    A later job is cut only when the time before it took more than a tenth
+    of its full time, a second at most: the same allowance the platform keeps
+    back from a batch's time for answering. Less than that is the bridge's
+    own work between records (reading the batch, decoding a message), not
+    another job's run, and a job that had all but that much of its full time
+    ran out of time on its own.
+    """
+    full = whole if own is None else min(own, whole)
+    return left < full - min(MAX_CUT_SLACK, max(full, 0) / 10)
 
 
 class QueueRunner:
@@ -150,7 +182,7 @@ class QueueRunner:
             if job:
                 outcomes.append(self.jobs.run(record, policy))
             elif celery is not None:
-                outcomes.append(celery.run(record, deadline))
+                outcomes.append(celery.run(record, deadline, received))
             else:
                 outcomes.append(self.jobs.not_a_job(record, no_celery))
         return outcomes

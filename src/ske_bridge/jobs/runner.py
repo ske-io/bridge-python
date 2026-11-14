@@ -11,20 +11,26 @@ the queue's ``tries``, ``backoff`` and ``timeout``:
 - The handler returned: deleted.
 - The handler raised or ran out of time: released after ``backoff`` seconds
   while attempts are left, else failed.
-- The batch's time ran out before the job started, or while it ran: it is
-  released at once, to run in a later delivery, without a failure logged.
+- The batch's time ran out before the job started, or earlier work in the
+  batch left it short of its full time and it ran out (see
+  ske_bridge.queue.cut_by_batch): it is released at once, without using a
+  try, to run in a later delivery, without a failure logged.
 
-``attempts`` is the platform's count of the message's deliveries, so every
-delivery counts toward ``tries``, a release for the batch's time included: a
-job released that way on its last try is a dead letter on its next delivery,
-without running.
+``attempts`` is the platform's count of the tries the job has used, this one
+included. A release that uses a try (a failure or the job's own timeout,
+released after ``backoff``) counts toward ``tries``; one for the batch's time
+does not: its outcome says ``keeps_tries``, and the platform delivers the
+message again with its count kept. Where the platform cannot do that, the
+next delivery counts as a try after all.
 
 Time: each job has ``timeout`` seconds (60 when unset) less a margin (5
 seconds, or half the timeout when that is less) for reporting outcomes. The
 batch has one deadline as well: the platform's ``deadline_ms``, less the same
 kind of margin, or else the job time counted from when the batch arrived. A
-job's limit is the earlier of the two; a job stopped by the batch's deadline
-rather than its own limit is released.
+job's limit is the earlier of the two. A first job runs to the batch's
+deadline, a little before its own limit, and running out of time there is
+its own timeout; a later job that earlier work left short of that time is
+released.
 
 Stopping a job: when it runs out of time its context's ``cancelled`` event is
 set, and, where the bridge can, it is interrupted:
@@ -61,7 +67,7 @@ from ske_bridge import jobs
 from ske_bridge.jobs import JobContext, JobTimeout
 from ske_bridge.jobs.message import InvalidMessage, decode
 from ske_bridge.outcome import JobOutcome
-from ske_bridge.queue import MAX_RELEASE_DELAY, batch_deadline, deadline_ms, job_timeout
+from ske_bridge.queue import MAX_RELEASE_DELAY, batch_deadline, cut_by_batch, deadline_ms, job_timeout
 
 logger = logging.getLogger("ske_bridge")
 
@@ -77,15 +83,6 @@ GRACE = 1.0
 #: seconds, so the event loop's own cancellation is never beaten to it.
 ALARM_AFTER_GRACE = 0.1
 
-#: How much sooner than its own limit the batch's deadline must end a job for
-#: the job to count as stopped by the deadline, in seconds. Without the
-#: platform's ``deadline_ms`` the batch's deadline is the job time counted
-#: from the request's arrival, so it ends the first job a little sooner than
-#: the job's own limit would (by the time the body took to read): that is
-#: still the job's own limit, not the batch's.
-CUT_TOLERANCE = 0.05
-
-
 @dataclass(frozen=True)
 class Policy:
     """A batch's settings for its jobs; times on the ``time.monotonic()``
@@ -99,6 +96,8 @@ class Policy:
     cutoff: float
     #: When the platform ends the request.
     end: float
+    #: The seconds from the batch's arrival to its cutoff.
+    whole: float
 
 
 class JobRunner:
@@ -116,7 +115,7 @@ class JobRunner:
         platform_ms = deadline_ms(options)
         cutoff = batch_deadline({"deadline_ms": platform_ms} if platform_ms else {"timeout": timeout}, received)
         end = time.monotonic() + (platform_ms / 1000 - time.time()) if platform_ms else received + timeout
-        return Policy(tries=tries, backoff=backoff, job_seconds=job_seconds, cutoff=cutoff, end=end)
+        return Policy(tries=tries, backoff=backoff, job_seconds=job_seconds, cutoff=cutoff, end=end, whole=cutoff - received)
 
     def not_a_job(self, record: dict[str, Any], reason: BaseException | None) -> JobOutcome:
         """The outcome for a message that is not a job message, in an
@@ -147,8 +146,8 @@ class JobRunner:
         started = time.monotonic()
         left = policy.cutoff - started
         if left <= 0:
-            return JobOutcome.release(message_id, attempts=attempts, error="not started: the batch's time ran out")
-        cut = left < policy.job_seconds - CUT_TOLERANCE
+            return JobOutcome.release_for_time(message_id, attempts=attempts, error="not started: the batch's time ran out")
+        cut = cut_by_batch(left, policy.job_seconds, policy.whole)
         limit = min(left, policy.job_seconds)
         stop_at = started + limit
         label = f"job {message.job} [{message.id}]"
@@ -173,7 +172,7 @@ class JobRunner:
                 logger.error("ske: %s failed after it ran out of time", label, exc_info=error)
             if cut:
                 logger.warning("ske: %s was stopped at the batch's deadline; it runs again in a later delivery", label)
-                return JobOutcome.release(message_id, attempts=attempts, error="stopped at the batch's deadline")
+                return JobOutcome.release_for_time(message_id, attempts=attempts, error="stopped at the batch's deadline")
             return self._retry_or_fail(message_id, attempts, policy, f"{label} ran past its {round(limit)}s time limit")
 
         if error is not None:

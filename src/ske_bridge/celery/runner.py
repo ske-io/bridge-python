@@ -11,13 +11,14 @@ platform pushes each message, and the outcome says what becomes of it:
   as under a worker, the retry publishes a new message carrying the retry's
   arguments, its eta and ``retries + 1``, and the delivered one is
   acknowledged. When that publish fails, the delivered message is released
-  instead, so the platform delivers it again rather than lose the task.
+  instead, at once, so the platform delivers it again rather than lose the
+  task.
 - The task raised anything else, or ran out of retries: it failed for good,
   and the message is a dead letter for the platform to keep (see
   JobOutcome). As under a worker, an exception is not retried unless the task
   asks for it.
-- ``Reject(requeue=True)`` releases the message; ``Reject`` without requeue
-  fails it.
+- ``Reject(requeue=True)`` releases the message at once; ``Reject`` without
+  requeue fails it.
 - A message whose ``eta`` (``countdown``) is still ahead is released, unrun,
   until then or for the longest the platform can hold a message (12 hours),
   whichever comes first; its eta is checked again on the next delivery. One
@@ -27,22 +28,36 @@ The retry count is the message's own ``retries`` header, which each retry's
 new message carries, never the platform's delivery count: a release for an
 eta, or a redelivery after a crash, is not a retry.
 
-Time limits work as a worker's: at the soft limit the task gets
-``SoftTimeLimitExceeded``, and at the hard limit ``TimeLimitExceeded``. The
+Time limits are a worker's: at the soft limit the task gets
+``SoftTimeLimitExceeded``, and at the hard limit ``TimeLimitExceeded``.
+Unlike a worker, which kills its child process at the hard limit, the bridge
+raises ``TimeLimitExceeded`` in the task's body, so ``autoretry_for`` or an
+``except`` there can catch it. The
 batch also has one deadline, less a margin for answering: the time the
 platform says it cuts the batch off (``options.deadline_ms``), or else the
 queue's timeout counted from when the batch arrived. Each task's hard limit is
-cut to the time left. A task stopped by the batch's deadline rather than its
-own limit did nothing wrong, so it is released (as ``Reject(requeue=True)``,
-which runs no failure handling) and delivered again in a later invocation;
-a message that has not started when too little is left is released too.
-Interrupting a task needs ``SIGALRM`` and the main thread, which a
-gunicorn sync worker serves requests on; elsewhere the platform's own timeout
-is the only limit.
+cut to the time left. A task that earlier work in the batch left short of its
+full time (its own hard limit, or the whole batch's time when it has none or
+that is shorter; see ske_bridge.queue.cut_by_batch) and that is stopped by
+the deadline did nothing wrong, so it is released (by an exception that is
+both ``Reject``, which runs no failure handling, and ``Ignore``, which
+``autoretry_for`` does not retry; see _batch_cut) and delivered again in a
+later invocation; a message that has not started when too little is left is
+released too. A task that had its full time and ran out of it fails with
+``TimeLimitExceeded``. Interrupting a task needs
+``SIGALRM`` and the main thread, which a gunicorn sync worker serves
+requests on; elsewhere the platform's own timeout is the only limit.
+
+Releases: one for the batch's time (not started, or cut) uses none of the
+message's tries: its outcome says ``keeps_tries``, and the platform delivers
+it again with its count kept. Every other release counts as a try: an error
+setting up the task, ``Reject(requeue=True)``, a retry that could not be
+published (delay 0), and a message held for its eta (the eta's delay).
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import signal
@@ -57,7 +72,7 @@ from typing import Any
 
 from ske_bridge.celery.message import InvalidMessage, TaskMessage, decode
 from ske_bridge.outcome import JobOutcome
-from ske_bridge.queue import MAX_RELEASE_DELAY, batch_deadline
+from ske_bridge.queue import MAX_RELEASE_DELAY, batch_deadline, cut_by_batch
 
 logger = logging.getLogger("ske_bridge")
 
@@ -93,13 +108,15 @@ class QueueRunner:
     def process(self, records: list[Any], options: dict[str, Any] | None = None, received: float | None = None) -> list[JobOutcome]:
         """One outcome per record, in the order they arrived; ``received``
         as ske_bridge.queue.batch_deadline takes it."""
+        received = time.monotonic() if received is None else received
         deadline = batch_deadline(options or {}, received)
-        return [self.run(r if isinstance(r, dict) else {}, deadline) for r in records]
+        return [self.run(r if isinstance(r, dict) else {}, deadline, received) for r in records]
 
-    def run(self, record: dict[str, Any], deadline: float | None) -> JobOutcome:
+    def run(self, record: dict[str, Any], deadline: float | None, received: float | None = None) -> JobOutcome:
         """One record's outcome, within the batch's ``deadline`` (see
         ske_bridge.queue.batch_deadline), which a batch that also holds jobs
-        shares with them."""
+        shares with them; ``received`` is when the batch arrived, by default
+        now."""
         # Celery's current app is per thread: in a thread other than the one
         # that created the app, shared_task proxies and current_app would be
         # Celery's default app, which publishes nowhere the platform reads.
@@ -133,17 +150,19 @@ class QueueRunner:
             return JobOutcome.release(message_id, delay=delay)
 
         hard, soft = self._limits(task, message)
-        cut = False
+        cut, batch_limit = False, False
         if deadline is not None:
-            left = deadline - time.monotonic()
+            started = time.monotonic()
+            left = deadline - started
             if left < MIN_START:
-                return JobOutcome.release(message_id, error="not started: the batch's time ran out")
+                return JobOutcome.release_for_time(message_id, error="not started: the batch's time ran out")
             if not hard or left < hard:
-                hard, cut = left, True
+                whole = deadline - (started if received is None else received)
+                hard, cut, batch_limit = left, cut_by_batch(left, hard or None, whole), True
         if soft is not None and hard is not None and soft >= hard:
             soft = None
 
-        run = self._run = _Run(soft, hard, cut=cut)
+        run = self._run = _Run(soft, hard, cut=cut, batch_limit=batch_limit)
         try:
             with self.around_job():
                 _, info, _, _ = self._tracer(task)(message.id, message.args, message.kwargs, request)
@@ -156,13 +175,13 @@ class QueueRunner:
             # The task did not finish: delivering it again is the only way it
             # still runs.
             logger.exception("ske: task %s[%s] could not be run", message.task, message.id)
-            return JobOutcome.release(message_id, attempts=attempts, error=_describe(e))
+            return JobOutcome.release(message_id, delay=0, attempts=attempts, error=_describe(e))
         finally:
             self._run = None
 
-        return self._outcome(message_id, attempts, info)
+        return self._outcome(message_id, attempts, info, run)
 
-    def _outcome(self, message_id: str, attempts: int, info: Any) -> JobOutcome:
+    def _outcome(self, message_id: str, attempts: int, info: Any, run: _Run) -> JobOutcome:
         from celery import states
 
         if info is None or info.state == states.IGNORED:
@@ -173,10 +192,13 @@ class QueueRunner:
             # The retry published its own message; this one is done.
             return JobOutcome.success(message_id, attempts=attempts, error=f"retried: {_describe(exc)}")
         if info.state == states.REJECTED:
+            if exc is not None and exc is run.cut_reject:
+                # Stopped at the batch's deadline: no try used.
+                return JobOutcome.release_for_time(message_id, attempts=attempts, error="stopped at the batch's deadline")
             if getattr(exc, "requeue", False):
-                return JobOutcome.release(message_id, attempts=attempts, error=_describe(exc))
+                return JobOutcome.release(message_id, delay=0, attempts=attempts, error=_describe(exc))
             if _raised_by_retry(exc):
-                return JobOutcome.release(message_id, attempts=attempts, error=f"the retry could not be sent: {_describe(exc.reason)}")
+                return JobOutcome.release(message_id, delay=0, attempts=attempts, error=f"the retry could not be sent: {_describe(exc.reason)}")
 
         return JobOutcome.failure(message_id, _describe(exc), attempts=attempts)
 
@@ -275,12 +297,17 @@ class _Run:
     its limit.
     """
 
-    def __init__(self, soft: float | None, hard: float | None, cut: bool = False):
+    def __init__(self, soft: float | None, hard: float | None, cut: bool = False, batch_limit: bool = False):
         self.soft = soft
         self.hard = hard
-        #: Whether the hard limit is the batch's deadline rather than the
-        #: task's own.
+        #: Whether the hard limit is the batch's deadline, cutting the task
+        #: short of its full time (ske_bridge.queue.cut_by_batch).
         self.cut = cut
+        #: Whether the hard limit is the batch's deadline rather than the
+        #: task's own limit.
+        self.batch_limit = batch_limit
+        #: The exception raised when the batch's deadline cut the task short.
+        self.cut_reject: Any = None
         self.returned = False
         self._frame: Any = None
         self._armed = False
@@ -314,7 +341,7 @@ class _Run:
         signal.signal(signal.SIGALRM, self._previous)
 
     def _on_alarm(self, signum: int, frame: Any) -> None:
-        from celery.exceptions import Reject, SoftTimeLimitExceeded, TimeLimitExceeded
+        from celery.exceptions import SoftTimeLimitExceeded, TimeLimitExceeded
 
         if not self._armed or frame is self._frame or frame.f_code is _Run.stop.__code__:
             return
@@ -325,8 +352,34 @@ class _Run:
                 signal.setitimer(signal.ITIMER_REAL, max(self.hard - self.soft, 0.001))
             raise SoftTimeLimitExceeded(f"the task ran past its {self.soft:g}s soft time limit")
         if self.cut:
-            raise Reject("stopped at the batch's deadline, to run again in a later delivery", requeue=True)
+            self.cut_reject = _batch_cut()("stopped at the batch's deadline, to run again in a later delivery", requeue=True)
+            raise self.cut_reject
+        if self.batch_limit:
+            raise TimeLimitExceeded(f"the task ran out of the batch's {_seconds(self.hard)}s")
         raise TimeLimitExceeded(f"the task ran past its {self.hard:g}s time limit")
+
+
+@functools.cache
+def _batch_cut() -> type:
+    """The exception that stops a task at the batch's deadline.
+
+    It is a ``Reject``, so the tracer records the task as rejected and runs
+    no failure handling, and an ``Ignore`` as well, so ``autoretry_for``
+    re-raises it rather than turn it into a retry: the tracer checks
+    ``Reject`` first. A task's own bare ``except Exception`` still catches
+    it, as it would any exception."""
+    from celery.exceptions import Ignore, Reject
+
+    class _BatchCut(Reject, Ignore):
+        def __str__(self) -> str:
+            return str(self.reason)
+
+    return _BatchCut
+
+
+def _seconds(value: float) -> str:
+    """Seconds for a message: whole ones, or a tenth under one."""
+    return f"{value:.0f}" if value >= 1 else f"{value:.1f}"
 
 
 def _raised_by_retry(exc: Any) -> bool:

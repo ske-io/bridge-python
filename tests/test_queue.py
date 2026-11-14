@@ -71,8 +71,11 @@ def test_jobs_and_tasks_share_the_batchs_deadline(platform, jobs, publish):
         timeout=60, deadline_ms=int((time.time() + 4) * 1000),
     )
 
-    assert first["released"] and first["error"] == "stopped at the batch's deadline"
+    # The job had the batch's whole time, its full time: it fails on its own
+    # timeout. The task never started, so it keeps its tries.
+    assert first["failed"] and "time limit" in first["error"]
     assert second["released"] and second["error"] == "not started: the batch's time ran out"
+    assert second["keeps_tries"] is True
     assert time.monotonic() - started < 3
 
 

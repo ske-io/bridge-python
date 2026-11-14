@@ -335,15 +335,84 @@ def test_off_the_main_thread_a_job_within_its_limit_is_acknowledged(jobs, calls)
     assert outcomes[0]["deleted"]
 
 
-def test_a_job_stopped_by_the_batchs_deadline_is_released_without_using_a_try(jobs):
+def test_a_first_job_that_runs_to_the_batchs_deadline_uses_a_try(jobs):
+    # As on the platform: the deadline is the queue's 2s timeout less the
+    # platform's own margin for answering, so the batch has 1.8s less
+    # min(5, 0.9), 0.9s, just under the job's own 1s. The job had its full
+    # time, and running out of it is its own timeout.
+    [outcome] = run(record(message("sleep", 5)), tries=2, backoff=7, timeout=2, deadline_ms=int((time.time() + 1.8) * 1000))
+
+    assert outcome["released"] and outcome["release_delay"] == 7 and "keeps_tries" not in outcome
+    assert outcome["error"].endswith("time limit")
+
+
+def test_a_first_job_given_less_than_its_own_limit_by_the_platform_still_uses_a_try(jobs):
     started = time.monotonic()
     # 2.6s left, less min(5, 2.6 / 2) for answering: about 1.3s, under the
-    # job's own 895s.
+    # job's own 895s. Nothing else used the batch's time: that is all the job
+    # could have, so it fails on its last try.
     [outcome] = run(record(message("sleep", 5)), timeout=900, deadline_ms=int((time.time() + 2.6) * 1000))
 
-    assert outcome["released"] and outcome["release_delay"] is None and not outcome["failed"]
-    assert outcome["error"] == "stopped at the batch's deadline"
+    assert outcome["failed"] and outcome["dead_letter"] and "time limit" in outcome["error"]
     assert 1.1 < time.monotonic() - started < 1.7
+
+
+def test_a_later_job_cut_short_by_earlier_work_is_released_keeping_its_tries(jobs, calls):
+    started = time.monotonic()
+    # 3.6s left, less min(5, 1.8): 1.8s for the batch, under the job's own
+    # 2s. The first job takes 0.5s of it, so the second is cut short of its
+    # full time by the batch, on its last try too.
+    first, second = run(
+        record(message("sleep", 0.5), message_id="first"),
+        record(message("sleep", 5), message_id="second"),
+        tries=1, timeout=4, deadline_ms=int((time.time() + 3.6) * 1000),
+    )
+
+    assert first["deleted"]
+    assert second["released"] and second["release_delay"] is None and second["keeps_tries"] is True
+    assert not second["failed"] and second["error"] == "stopped at the batch's deadline"
+    assert calls == [("slept", 0.5)]
+    assert 1.6 < time.monotonic() - started < 2.4
+
+
+@pytest.mark.parametrize(("used", "cut"), [(0.5, False), (1.5, True)])
+def test_a_job_is_cut_only_when_earlier_work_took_more_than_the_slack(calls, used, cut):
+    # Without the platform's deadline the batch has the job time, 55s, from
+    # arrival; the slack is a second. A job out of time after less than that
+    # of earlier work owns the timeout.
+    @job("out-of-time")
+    def out_of_time(payload, ctx):
+        raise JobTimeout("out of time")
+
+    [outcome] = QueueRunner().process([record(message("out-of-time"))], {"timeout": 60, "tries": 2, "backoff": 3}, time.monotonic() - used)
+
+    if cut:
+        assert outcome.released and outcome.release_delay is None and outcome.keeps_tries
+        assert outcome.error == "stopped at the batch's deadline"
+    else:
+        assert outcome.released and outcome.release_delay == 3 and not outcome.keeps_tries
+
+
+@pytest.mark.parametrize(
+    ("left", "own", "whole", "cut"),
+    [
+        # Full time is the job's own 10s; the slack is 1s.
+        (9.0, 10.0, 20.0, False),
+        (8.999, 10.0, 20.0, True),
+        # On the platform the batch is a little shorter than the job's own
+        # limit: full time is the batch's 54s.
+        (54.0, 55.0, 54.0, False),
+        (53.0, 55.0, 54.0, False),
+        (52.999, 55.0, 54.0, True),
+        # No limit of its own: the batch's whole time; a tenth of a short one.
+        (0.45, None, 0.5, False),
+        (0.449, None, 0.5, True),
+    ],
+)
+def test_the_cut_rule_boundary(left, own, whole, cut):
+    from ske_bridge.queue import cut_by_batch
+
+    assert cut_by_batch(left, own, whole) is cut
 
 
 def test_the_batch_shares_one_deadline(jobs, calls):
@@ -355,10 +424,11 @@ def test_the_batch_shares_one_deadline(jobs, calls):
     )
 
     # 4s left, less min(5, 4 / 2): 2s for the whole batch. The first job gets
-    # all of it and is stopped by the deadline, not its own 55s, so it is
-    # released, and the second is left no time to start.
-    assert first["released"] and first["error"] == "stopped at the batch's deadline"
+    # all of it, its full time, and fails on its own timeout; the second is
+    # left no time to start, and keeps its tries.
+    assert first["failed"] and "time limit" in first["error"]
     assert second["released"] and second["error"] == "not started: the batch's time ran out"
+    assert second["release_delay"] is None and second["keeps_tries"] is True
     assert calls == []
     assert time.monotonic() - started < 3
 
@@ -379,10 +449,10 @@ def test_without_the_platforms_deadline_the_first_job_has_its_own_limit(jobs):
     assert outcome["error"].endswith("ran past its 1s time limit")
 
 
-def test_a_release_for_the_batchs_time_still_counts_toward_tries(jobs, calls):
-    # The platform's attempts is its delivery count, so the delivery after a
-    # release is the next attempt: with tries=1 a job released at the
-    # batch's deadline is a dead letter on its next delivery, unrun.
+def test_a_release_for_the_batchs_time_keeps_the_jobs_tries(jobs, calls):
+    # A job left unstarted is released keeping its tries: the platform
+    # delivers it again with the same attempts, so with tries=1 it still
+    # runs on that delivery.
     body = message("add", {"a": 1, "b": 1})
     first, released = run(
         record(message("sleep", 5), message_id="slow"),
@@ -390,12 +460,18 @@ def test_a_release_for_the_batchs_time_still_counts_toward_tries(jobs, calls):
         tries=1, timeout=60, deadline_ms=int((time.time() + 2) * 1000),
     )
     assert released["released"] and released["error"] == "not started: the batch's time ran out"
+    assert released["release_delay"] is None and released["keeps_tries"] is True
 
-    [redelivered] = run(record(body, message_id="later", attempts=2), tries=1)
+    [redelivered] = run(record(body, message_id="later", attempts=1), tries=1)
 
-    assert redelivered["failed"] and redelivered["dead_letter"]
-    assert redelivered["error"] == "delivered 2 times, more than the 1 tries allowed"
-    assert calls == []
+    assert redelivered["deleted"]
+    assert calls == [("add", 2, 1)]
+
+
+def test_a_counted_release_does_not_say_it_keeps_tries(jobs):
+    [outcome] = run(record(message("fail")), tries=2, backoff=0)
+
+    assert outcome["released"] and outcome["release_delay"] == 0 and "keeps_tries" not in outcome
 
 
 def test_an_async_job_holding_the_loop_on_the_main_thread_is_interrupted(calls):

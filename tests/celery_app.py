@@ -79,6 +79,12 @@ def slow(seconds):
     return "finished"
 
 
+@app.task(name="tests.autoretry_slow", autoretry_for=(Exception,), retry_kwargs={"countdown": 7, "max_retries": 3})
+def autoretry_slow(seconds):
+    time.sleep(seconds)
+    return "finished"
+
+
 @app.task(name="tests.soft", soft_time_limit=0.2)
 def soft():
     time.sleep(2)

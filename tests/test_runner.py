@@ -115,6 +115,8 @@ def test_a_retry_that_cannot_be_published_releases_the_message(runner, publish, 
 
     assert outcome["released"] and not outcome["failed"]
     assert "the retry could not be sent" in outcome["error"]
+    # The task ran: the release uses a try.
+    assert outcome["release_delay"] == 0 and "keeps_tries" not in outcome
 
 
 def test_autoretry_for_publishes_its_retry(runner, publish, sqs_sent):
@@ -140,6 +142,23 @@ def test_reject_releases_only_when_it_requeues(runner, publish, requeue, release
 
     assert outcome["released"] is released
     assert outcome["failed"] is not released
+    if released:
+        # The task asked for it: the release uses a try.
+        assert outcome["release_delay"] == 0 and "keeps_tries" not in outcome
+
+
+def test_a_task_that_could_not_be_set_up_is_released_using_a_try(celery_app, publish):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def around():
+        raise ConnectionError("database away")
+        yield
+
+    [outcome] = run(QueueRunner(celery_app, around_job=around), record(publish("tests.add", (1, 2))))
+
+    assert outcome["released"] and outcome["release_delay"] == 0 and "keeps_tries" not in outcome
+    assert outcome["error"] == "ConnectionError: database away"
 
 
 def test_ignore_acknowledges(runner, publish):
@@ -154,7 +173,7 @@ def test_a_countdown_still_ahead_is_released_until_then_unrun(runner, publish):
     [outcome] = run(runner, record(publish("tests.add", (1, 2), countdown=120)))
 
     assert outcome["released"] and 118 <= outcome["release_delay"] <= 120
-    assert outcome["error"] is None
+    assert outcome["error"] is None and "keeps_tries" not in outcome
     assert calls == []
 
 
@@ -262,7 +281,9 @@ def test_the_queue_timeout_stops_a_task_before_the_function_is_stopped(runner, p
     started = time.monotonic()
     [outcome] = run(runner, record(publish("tests.slow", (5,))), timeout=2)
 
-    assert outcome["released"] and "batch's deadline" in outcome["error"]
+    # The first task had the batch's whole time, its full time with no limit
+    # of its own: running out of it is its own timeout.
+    assert outcome["failed"] and outcome["error"].startswith("TimeLimitExceeded")
     assert time.monotonic() - started < 1.5
 
 
@@ -291,11 +312,11 @@ def test_the_batch_shares_one_deadline(runner, publish):
     first, second = run(runner, record(slow, message_id="slow"), record(fast, message_id="fast"), timeout=4)
 
     # job_timeout(4) is 2s for the whole batch: the first task gets all of
-    # it and is stopped by the deadline, not by a limit of its own, so it is
-    # released; the second is left too little to start.
-    assert first["released"] and not first["failed"] and first["release_delay"] is None
-    assert "batch's deadline" in first["error"]
+    # it, its full time, and running out of it fails it as its own limit
+    # would; the second is left too little to start, and keeps its tries.
+    assert first["failed"] and first["error"].startswith("TimeLimitExceeded")
     assert second["released"] and second["error"] == "not started: the batch's time ran out"
+    assert second["release_delay"] is None and second["keeps_tries"] is True
     assert time.monotonic() - started < 3
 
 
@@ -305,8 +326,52 @@ def test_a_healthy_task_late_in_the_batch_is_released_not_dead_lettered(runner, 
     outcomes = run(runner, record(publish("tests.slow", (1.2,)), message_id="a"), record(publish("tests.slow", (3,)), message_id="b"), timeout=4)
 
     assert outcomes[0]["deleted"]
+    # The first task took 1.2s of the batch's 2s: the second was cut short by
+    # the batch, not its own time, so it keeps its tries.
     assert outcomes[1]["released"] and not outcomes[1]["failed"] and not outcomes[1]["dead_letter"]
+    assert outcomes[1]["release_delay"] is None and outcomes[1]["keeps_tries"] is True
+    assert "batch's deadline" in outcomes[1]["error"]
     assert calls == []
+
+
+def test_autoretry_for_exception_does_not_retry_a_cut_task(runner, publish, sqs_sent):
+    first, second = publish("tests.slow", (1.2,)), publish("tests.autoretry_slow", (3,))
+    sent = len(sqs_sent)
+
+    outcomes = run(runner, record(first, message_id="a"), record(second, message_id="b"), timeout=4)
+
+    # The cut is not an error the task's autoretry_for takes: no retry is
+    # published, and the message keeps its tries.
+    assert outcomes[0]["deleted"]
+    assert outcomes[1]["released"] and outcomes[1]["release_delay"] is None and outcomes[1]["keeps_tries"] is True
+    assert outcomes[1]["error"] == "stopped at the batch's deadline"
+    assert len(sqs_sent) == sent
+
+
+def test_a_tasks_own_requeue_in_a_run_the_batch_would_cut_still_counts(runner, publish):
+    # The second task starts short of its full time, but rejects itself
+    # before the deadline: that release is its own, and uses a try.
+    outcomes = run(runner, record(publish("tests.slow", (1,)), message_id="a"), record(publish("tests.reject", (True,)), message_id="b"), timeout=4)
+
+    assert outcomes[1]["released"] and outcomes[1]["release_delay"] == 0 and "keeps_tries" not in outcomes[1]
+
+
+def test_a_task_without_a_limit_that_runs_out_of_the_batch_says_so(runner, publish):
+    [outcome] = run(runner, record(publish("tests.slow", (5,))), timeout=4)
+
+    assert outcome["failed"] and outcome["error"].startswith("TimeLimitExceeded") and "the task ran out of the batch's 2s" in outcome["error"]
+
+
+def test_a_task_with_its_own_limit_cut_short_by_the_batch_keeps_its_tries(runner, publish):
+    env = envelope(publish("tests.slow", (5,)))
+    env["headers"]["timelimit"] = [1.5, None]
+
+    # The batch has 2s and the task's own limit is 1.5s, its full time; the
+    # first task takes 1s of the batch, so the deadline cuts the second.
+    outcomes = run(runner, record(publish("tests.slow", (1,)), message_id="a"), record(json.dumps(env), message_id="b"), timeout=4)
+
+    assert outcomes[0]["deleted"]
+    assert outcomes[1]["released"] and outcomes[1]["keeps_tries"] is True
 
 
 def test_a_tasks_own_limit_inside_the_deadline_still_fails_it(runner, publish):
@@ -324,8 +389,9 @@ def test_the_platforms_deadline_wins_over_the_timeout(runner, publish):
     started = time.monotonic()
     [outcome] = run(runner, record(publish("tests.slow", (5,))), timeout=900, deadline_ms=deadline_ms)
 
-    # 2.6s left, less min(5, 2.6 / 2) for answering: about 1.3s.
-    assert outcome["released"] and "batch's deadline" in outcome["error"]
+    # 2.6s left, less min(5, 2.6 / 2) for answering: about 1.3s, all the
+    # time the task could have, so running out of it fails it.
+    assert outcome["failed"] and outcome["error"].startswith("TimeLimitExceeded")
     assert 1.1 < time.monotonic() - started < 1.6
 
 
@@ -333,6 +399,7 @@ def test_a_passed_platform_deadline_starts_nothing(runner, publish):
     [outcome] = run(runner, record(publish("tests.add", (1, 1))), deadline_ms=int((time.time() - 1) * 1000))
 
     assert outcome["released"] and outcome["error"] == "not started: the batch's time ran out"
+    assert outcome["release_delay"] is None and outcome["keeps_tries"] is True
 
 
 @pytest.mark.parametrize("options", [{"deadline_ms": "soon"}, {"deadline_ms": True}, {"timeout": True}, {}])
