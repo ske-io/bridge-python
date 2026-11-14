@@ -12,7 +12,8 @@ hop the platform puts in front of the app, so ``request.remote_addr``, the
 scheme and the host are the client's (see ske_bridge.forwarded). Its static
 routes refuse dotfiles and source files, as the platform's static server does
 (see ske_bridge.static). Everywhere it adds ``flask ske schedule``, the
-platform's scheduler command.
+platform's scheduler command, which sends the Celery beat entries and runs
+the scheduled tasks (ske_bridge.schedule) due.
 
 The Celery app is ``celery=``, else what ``SKE_CELERY_APP`` or ``CELERY_APP``
 names, else ``app.extensions["celery"]`` as Flask's Celery guide sets it,
@@ -28,8 +29,8 @@ from contextlib import nullcontext
 from typing import Any
 
 import click
-from flask import Flask, abort, current_app, request
-from flask.cli import with_appcontext
+from flask import Flask, abort, request
+from flask.cli import ScriptInfo, pass_script_info
 
 from ske_bridge import cache, environment, jobs
 from ske_bridge.forwarded import TRUSTED_HOPS
@@ -204,12 +205,21 @@ def ske() -> None:
     pass
 
 
-@ske.command(help="Send the Celery beat schedule's entries that are due this minute.")
-@with_appcontext
-def schedule() -> None:
-    from ske_bridge.celery.scheduler import tick
+@ske.command(help="Send the Celery beat schedule's entries and run the scheduled tasks that are due this minute.")
+@pass_script_info
+def schedule(info: ScriptInfo) -> None:
+    """See ske_bridge.schedule.command. Each task runs in an application
+    context of its own, as each job does, so ``g`` never carries over from
+    one task to the next."""
+    from ske_bridge.schedule.command import run
 
-    bridge: SkeBridge = current_app.extensions["ske"]
-    result = tick(bridge.celery_app(current_app), echo=click.echo)
+    app = info.load_app()
+    bridge: SkeBridge = app.extensions["ske"]
+
+    def celery() -> Any:
+        with app.app_context():
+            return bridge.celery_app(app)
+
+    result = run(celery, echo=click.echo, around=app.app_context)
     if not result.ok:
-        raise click.ClickException(f"{len(result.failed)} scheduled task(s) could not be sent")
+        raise click.ClickException(result.failure)

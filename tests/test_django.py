@@ -9,8 +9,9 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import Client
 
+from ske_bridge.celery import NoCeleryApp
 from ske_bridge.django.apps import MIDDLEWARE, SMTP_BACKEND, install_middleware, trust_forwarded_proto, use_cache_prefix, use_mail_service
-from tests.conftest import record
+from tests.conftest import define_task, record
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -185,6 +186,87 @@ def test_ske_schedule_fails_when_an_entry_cannot_be_sent(platform, celery_app, m
 
     with pytest.raises(CommandError, match="1 scheduled task"):
         call_command("ske_schedule")
+
+
+def test_manage_py_ske_schedule_runs_the_tasks_after_the_beat_entries(platform, sqs_sent, monkeypatch, capsys):
+    import ske_bridge.celery.scheduler as scheduler
+    from tests.test_scheduler import MONDAY_0930_PARIS
+
+    monkeypatch.setattr(scheduler, "current_minute", lambda: MONDAY_0930_PARIS)
+    define_task("* * * * *", "native", lambda: print("native ran"))
+
+    call_command("ske_schedule")
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[:3] == [line for line in out if line.startswith("sent ")]
+    assert out[3:5] == ["native ran", out[4]] and out[4].startswith("ran native in ")
+
+
+def test_manage_py_ske_schedule_runs_tasks_without_a_celery_app(monkeypatch, capsys):
+    import ske_bridge.django.management.commands.ske_schedule as command
+
+
+    def no_celery():
+        raise NoCeleryApp("no Celery app is configured")
+
+    monkeypatch.setattr(command, "find_app", no_celery)
+    define_task("* * * * *", "native")
+    monkeypatch.setenv("SKE_SCHEDULED_AT", "2026-03-04T10:01:00Z")
+
+    call_command("ske_schedule")
+    assert capsys.readouterr().out.startswith("ran native in ")
+
+    define_task("* * * * *", "broken", lambda: 1 / 0)
+    with pytest.raises(CommandError, match="1 scheduled task\\(s\\) failed: broken"):
+        call_command("ske_schedule")
+
+
+def test_manage_py_ske_schedule_without_tasks_or_a_celery_app_names_both(monkeypatch):
+    import ske_bridge.django.management.commands.ske_schedule as command
+
+    def no_celery():
+        raise NoCeleryApp("no Celery app is configured")
+
+    monkeypatch.setattr(command, "find_app", no_celery)
+
+    with pytest.raises(CommandError, match="no scheduled tasks are defined .*from AppConfig.ready\\(\\)\\?\\) and no Celery app is configured"):
+        call_command("ske_schedule")
+
+
+def test_manage_py_ske_schedule_runs_each_task_inside_connection_upkeep(monkeypatch):
+    import django.db
+    from django.apps import apps
+
+    import ske_bridge.django.management.commands.ske_schedule as command
+
+    # As the app's ready() sets it up; the test fixtures reset it.
+    apps.get_app_config("ske_bridge").ready()
+    events = []
+    monkeypatch.setattr(django.db, "close_old_connections", lambda **kwargs: events.append("close old connections"))
+    monkeypatch.setattr(command, "find_app", lambda: (_ for _ in ()).throw(NoCeleryApp("none")))
+    define_task("* * * * *", "one", lambda: events.append("one"))
+    define_task("* * * * *", "two", lambda: events.append("two"))
+
+    call_command("ske_schedule")
+
+    assert events == ["close old connections", "one", "close old connections"] * 1 + ["close old connections", "two", "close old connections"]
+
+
+def test_in_django_a_task_without_a_time_zone_is_read_in_settings_time_zone(monkeypatch, capsys):
+    from django.conf import settings
+
+    import ske_bridge.django.management.commands.ske_schedule as command
+
+    monkeypatch.setattr(command, "find_app", lambda: (_ for _ in ()).throw(NoCeleryApp("none")))
+    # Django's default, which it applies to the process as TZ.
+    assert settings.TIME_ZONE == "America/Chicago" == os.environ["TZ"]
+    define_task("0 4 * * *", "four-in-chicago")
+    # 10:00 UTC is 04:00 in Chicago in March, before daylight saving time.
+    monkeypatch.setenv("SKE_SCHEDULED_AT", "2026-03-04T10:00:00Z")
+
+    call_command("ske_schedule")
+
+    assert capsys.readouterr().out.startswith("ran four-in-chicago in ")
 
 
 FORWARDED = {

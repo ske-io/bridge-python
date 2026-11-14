@@ -1,8 +1,10 @@
 """The Celery beat schedule, without a beat process.
 
-Once a minute the platform runs the scheduler command in the container (``python manage.py ske_schedule``,
-``flask ske schedule``). Each run sends the ``beat_schedule`` entries that are
-due in the current minute to the queue, as beat would, and exits. Nothing is
+Once a minute the platform runs the scheduler command in the container
+(``python manage.py ske_schedule``, ``flask ske schedule``, ``ske-bridge
+schedule``). Each run sends the ``beat_schedule`` entries that are due in the
+current minute to the queue, as beat would, runs the app's own scheduled
+tasks (see ske_bridge.schedule.command), and exits. Nothing is
 remembered between runs, so whether an entry is due is decided from the
 minute alone:
 
@@ -63,6 +65,10 @@ class TickResult:
     @property
     def ok(self) -> bool:
         return not self.failed
+
+    @property
+    def idle(self) -> bool:
+        return not (self.sent or self.skipped or self.failed)
 
 
 def current_minute() -> datetime:
@@ -148,10 +154,12 @@ def is_due(sched: Any, minute: datetime, app: Any, name: str = "") -> bool:
     return minute <= event < minute + timedelta(minutes=1)
 
 
-def tick(app: Any, minute: datetime | None = None, echo: Callable[[str], Any] = print) -> TickResult:
+def tick(
+    app: Any, minute: datetime | None = None, echo: Callable[[str], Any] = print, *, report_idle: bool = True,
+) -> TickResult:
     """Sends the entries due in ``minute`` (this minute by default) and
     reports what was sent. An entry that fails to send does not stop the
-    others."""
+    others. With ``report_idle``, a debug line says when nothing was due."""
     from celery.beat import BeatLazyFunc
 
     from ske_bridge import maintenance
@@ -185,6 +193,6 @@ def tick(app: Any, minute: datetime | None = None, echo: Callable[[str], Any] = 
         result.sent.append(name)
         echo(f"sent {name} ({entry['task']}) as {sent.id}")
 
-    if not result.sent and not result.failed and not result.skipped:
-        echo("nothing due")
+    if report_idle and result.idle:
+        logger.debug("ske: nothing due")
     return result
